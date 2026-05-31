@@ -1,0 +1,104 @@
+generator client { provider = "prisma-client-js" }
+datasource db { provider = "postgresql" url = env("DATABASE_URL") }
+
+enum MissionStatus { active paused archived }
+enum CycleStatus { observing proposed approved running waiting_for_codex pr_opened waiting_for_checks waiting_for_preview_deploy preview_deployed waiting_for_merge waiting_for_production_deploy production_deployed completed failed rejected }
+enum RiskLevel { low medium high }
+enum AuthorType { human autoapp codex github vercel unknown }
+enum MemoryClassification { human_instruction human_approval human_rejection codex_update github_update vercel_update autoapp_log mission_update general_noise unknown }
+enum DecisionType { approved rejected paused resumed merge_recommended rollback_requested }
+enum IntegrationSource { slack codex github vercel autoapp }
+
+model Mission {
+  id String @id @default(cuid())
+  title String
+  description String
+  successCriteria String
+  targetAudience String?
+  status MissionStatus @default(active)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  cycles Cycle[]
+  snapshots WebAppSnapshot[]
+}
+
+model Cycle {
+  id String @id @default(cuid())
+  missionId String
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  status CycleStatus @default(observing)
+  observation String
+  proposal String
+  rationale String
+  riskLevel RiskLevel @default(low)
+  acceptanceCriteria String
+  forbiddenAreas String
+  slackRootTs String?
+  codexRequestTs String?
+  githubPrUrl String?
+  vercelPreviewUrl String?
+  vercelProductionUrl String?
+  resultSummary String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  decisions Decision[]
+  memories SlackMemory[]
+  events IntegrationEvent[]
+}
+
+model SlackMemory {
+  id String @id @default(cuid())
+  channelId String
+  messageTs String
+  threadTs String?
+  authorId String
+  authorType AuthorType @default(unknown)
+  rawText String
+  normalizedText String
+  classification MemoryClassification @default(unknown)
+  importance Int @default(0)
+  relatedCycleId String?
+  relatedCycle Cycle? @relation(fields: [relatedCycleId], references: [id])
+  extractedPrUrl String?
+  extractedDeploymentUrl String?
+  extractedCycleCode String?
+  createdAt DateTime @default(now())
+  @@unique([channelId, messageTs])
+  @@index([channelId, createdAt])
+  @@index([classification, createdAt])
+}
+
+model Decision {
+  id String @id @default(cuid())
+  cycleId String
+  cycle Cycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  decision DecisionType
+  decidedBySlackUserId String
+  rationale String?
+  slackMessageTs String?
+  createdAt DateTime @default(now())
+}
+
+model IntegrationEvent {
+  id String @id @default(cuid())
+  source IntegrationSource
+  eventType String
+  payload Json
+  relatedCycleId String?
+  relatedCycle Cycle? @relation(fields: [relatedCycleId], references: [id])
+  createdAt DateTime @default(now())
+  @@index([source, eventType, createdAt])
+}
+
+model WebAppSnapshot {
+  id String @id @default(cuid())
+  missionId String
+  mission Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  url String
+  title String?
+  description String?
+  extractedText String
+  evaluationSummary String
+  alignmentScore Int?
+  createdAt DateTime @default(now())
+}
