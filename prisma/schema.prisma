@@ -1,13 +1,80 @@
-generator client { provider = "prisma-client-js" }
-datasource db { provider = "postgresql" url = env("DATABASE_URL") }
+generator client {
+  provider = "prisma-client-js"
+}
 
-enum MissionStatus { active paused archived }
-enum CycleStatus { observing proposed approved running waiting_for_codex pr_opened waiting_for_checks waiting_for_preview_deploy preview_deployed waiting_for_merge waiting_for_production_deploy production_deployed completed failed rejected }
-enum RiskLevel { low medium high }
-enum AuthorType { human autoapp codex github vercel unknown }
-enum MemoryClassification { human_instruction human_approval human_rejection codex_update github_update vercel_update autoapp_log mission_update general_noise unknown }
-enum DecisionType { approved rejected paused resumed merge_recommended rollback_requested }
-enum IntegrationSource { slack codex github vercel autoapp }
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum MissionStatus {
+  active
+  paused
+  archived
+}
+
+enum CycleStatus {
+  observing
+  proposed
+  approved
+  running
+  waiting_for_codex
+  pr_opened
+  waiting_for_checks
+  waiting_for_preview_deploy
+  preview_deployed
+  waiting_for_merge
+  waiting_for_production_deploy
+  production_deployed
+  completed
+  failed
+  rejected
+}
+
+enum RiskLevel {
+  low
+  medium
+  high
+}
+
+enum AuthorType {
+  human
+  autoapp
+  codex
+  github
+  vercel
+  unknown
+}
+
+enum MemoryClassification {
+  human_instruction
+  human_approval
+  human_rejection
+  codex_update
+  github_update
+  vercel_update
+  autoapp_log
+  mission_update
+  general_noise
+  unknown
+}
+
+enum DecisionType {
+  approved
+  rejected
+  paused
+  resumed
+  merge_recommended
+  rollback_requested
+}
+
+enum IntegrationSource {
+  slack
+  codex
+  github
+  vercel
+  autoapp
+}
 
 model Mission {
   id String @id @default(cuid())
