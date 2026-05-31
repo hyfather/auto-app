@@ -18,7 +18,6 @@ export async function POST(req: Request) {
   if (!(await verify(req, rawBody))) return NextResponse.json({ error: "invalid signature" }, { status: 401 });
   const form = new URLSearchParams(rawBody);
   const text = form.get("text") || "help";
-  const userId = form.get("user_id") || "unknown";
-  const response = await handleAutoappCommand(text, userId);
+  const response = await handleAutoappCommand(text);
   return NextResponse.json({ response_type: "ephemeral", text: response });
 }

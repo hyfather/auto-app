@@ -7,7 +7,7 @@ import { summarizeLatestCycle } from "@/lib/autoapp/summarize";
 import { classifySlackMessage } from "./classifySlackMessage";
 import { parseToolUpdate } from "./parseToolUpdate";
 
-export async function handleAutoappCommand(text: string, userId: string) {
+export async function handleAutoappCommand(text: string) {
   const trimmed = text.trim();
   const [command, ...rest] = trimmed.split(/\s+/);
   const arg = rest.join(" ").trim();
@@ -58,7 +58,7 @@ function missionFromMention(text: string) {
 export async function handleMention(text: string, userId: string, ts?: string) {
   const lower = text.toLowerCase();
   const mission = missionFromMention(text);
-  if (mission) return handleAutoappCommand(`set-mission ${mission}`, userId);
+  if (mission) return handleAutoappCommand(`set-mission ${mission}`);
   if (/approve|approved|yes|proceed|go ahead/.test(lower)) {
     const cycle = await getActiveCycle();
     if (!cycle || cycle.status !== "proposed") return "No proposed cycle is waiting for approval.";
@@ -72,11 +72,11 @@ export async function handleMention(text: string, userId: string, ts?: string) {
     return "Rejection recorded. AutoApp will not ask Codex to implement that proposal.";
   }
   if (/status|working on|last deployment/.test(lower)) return getStatusText();
-  if (/propose|improve/.test(lower)) return handleAutoappCommand("propose", userId);
-  if (/pause/.test(lower)) return handleAutoappCommand("pause", userId);
-  if (/resume/.test(lower)) return handleAutoappCommand("resume", userId);
+  if (/propose|improve/.test(lower)) return handleAutoappCommand("propose");
+  if (/pause/.test(lower)) return handleAutoappCommand("pause");
+  if (/resume/.test(lower)) return handleAutoappCommand("resume");
   if (/summarize|summary/.test(lower)) return summarizeLatestCycle();
-  return handleAutoappCommand("help", userId);
+  return handleAutoappCommand("help");
 }
 
 export async function recordSlackMessage(event: { text?: string; user?: string; bot_id?: string; channel?: string; ts?: string; thread_ts?: string }) {
