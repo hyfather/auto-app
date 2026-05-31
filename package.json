@@ -15,11 +15,11 @@
   "dependencies": {
     "@prisma/client": "5.22.0",
     "@slack/web-api": "7.9.3",
-    "next": "15.3.3",
+    "next": "15.3.9",
     "openai": "4.104.0",
     "prisma": "5.22.0",
-    "react": "19.0.0",
-    "react-dom": "19.0.0",
+    "react": "19.0.4",
+    "react-dom": "19.0.4",
     "zod": "3.25.76"
   },
   "devDependencies": {
@@ -27,7 +27,7 @@
     "@types/react": "19.0.12",
     "@types/react-dom": "19.0.4",
     "eslint": "9.28.0",
-    "eslint-config-next": "15.3.3",
+    "eslint-config-next": "15.3.9",
     "tsx": "4.19.4",
     "typescript": "5.8.3"
   },
