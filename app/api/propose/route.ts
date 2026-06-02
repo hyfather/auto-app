@@ -1,3 +1,11 @@
 import { NextResponse } from "next/server";
 import { runObservationCycle } from "@/lib/autoapp/observe";
-export async function POST() { return NextResponse.json(await runObservationCycle({ post: true })); }
+import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
+export async function POST() {
+  try {
+    return NextResponse.json(await runObservationCycle({ post: true }));
+  } catch (error) {
+    if (isMissingDatabaseSchemaError(error)) return NextResponse.json({ status: "database_schema_missing", message: DATABASE_SCHEMA_SETUP_MESSAGE }, { status: 503 });
+    throw error;
+  }
+}

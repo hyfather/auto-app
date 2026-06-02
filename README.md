@@ -45,7 +45,7 @@ Mentions such as `@autoapp approve`, `@autoapp reject`, `@autoapp propose the ne
 
 1. Install dependencies: `npm install`.
 2. Configure Neon Postgres and set `DATABASE_URL`.
-3. Run Prisma migration: `npx prisma migrate dev --name init`.
+3. Run Prisma migration locally: `npx prisma migrate dev --name init`. Production deploys run `npx prisma migrate deploy` as part of `npm run build`; you can also run `npm run prisma:deploy` manually against `DATABASE_URL`.
 4. Seed local data if desired: `npm run prisma:seed`.
 5. Create a Slack app for AutoApp.
 6. Configure the Slack bot token and signing secret.
