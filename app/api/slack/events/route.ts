@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { after } from "next/server";
 import { handleMention, recordSlackMessage } from "@/lib/slack/handlers";
+import { nudgeActiveCycles } from "@/lib/autoapp/execute";
 import { postToGeneral } from "@/lib/slack/postMessage";
 import { verifySlackRequest } from "@/lib/slack/verify";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
@@ -84,12 +85,15 @@ export async function POST(req: Request) {
   }
 
   // Process after responding so we always ack inside Slack's timeout window.
+  // After handling the message, nudge any in-flight cycle forward so a launched
+  // Cursor agent's PR gets discovered, watched, and merged even between cron runs.
   after(async () => {
     try {
       await processEvent(event);
     } catch (error) {
       console.error("[Slack events] Unhandled processing error:", error instanceof Error ? error.message : error);
     }
+    await nudgeActiveCycles();
   });
 
   return NextResponse.json({ ok: true });

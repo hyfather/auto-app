@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { after } from "next/server";
 import { handleAutoappCommand } from "@/lib/slack/handlers";
+import { nudgeActiveCycles } from "@/lib/autoapp/execute";
 import { verifySlackRequest } from "@/lib/slack/verify";
 
 // Fast subcommands that only touch the database and reliably reply within
@@ -43,6 +44,13 @@ export async function POST(req: Request) {
   const responseUrl = form.get("response_url") || undefined;
   const userId = form.get("user_id") || "unknown";
   const command = (text.split(/\s+/)[0] || "help").toLowerCase();
+
+  // Every slash interaction also nudges any in-flight cycle forward (discover a
+  // newly opened PR, watch checks, merge when ready) so the loop keeps moving
+  // even between scheduled cron runs.
+  after(async () => {
+    await nudgeActiveCycles();
+  });
 
   if (responseUrl && !SYNCHRONOUS_COMMANDS.has(command)) {
     after(async () => {
