@@ -4,6 +4,13 @@ import { formatCycleCode, visibleLog } from "./policies";
 
 const AUTOAPP_ACTOR = "autoapp";
 
+function codexMention() {
+  const rawId = process.env.SLACK_CODEX_ID?.trim();
+  if (!rawId) throw new Error("SLACK_CODEX_ID is required to mention Codex in Slack messages.");
+  const userId = rawId.startsWith("U") ? rawId : `U${rawId}`;
+  return `<@${userId}>`;
+}
+
 export async function approveAndRequestCodex(cycleId: string, userId: string = AUTOAPP_ACTOR, slackMessageTs?: string) {
   const cycle = await prisma.cycle.findUnique({ where: { id: cycleId }, include: { mission: true } });
   if (!cycle) throw new Error("No cycle found to approve.");
@@ -13,7 +20,7 @@ export async function approveAndRequestCodex(cycleId: string, userId: string = A
   await prisma.cycle.update({ where: { id: cycleId }, data: { status: "approved" } });
 
   const code = formatCycleCode(cycle.id);
-  const text = visibleLog(code, "Action", `@Codex please implement ${code}.
+  const text = visibleLog(code, "Action", `${codexMention()} please implement ${code}.
 
 Mission:
 ${cycle.mission.title}
@@ -60,7 +67,7 @@ export async function requestAutonomousMergeIfReady(cycleId: string) {
   await prisma.cycle.update({ where: { id: cycleId }, data: { status: "waiting_for_merge" } });
 
   const code = formatCycleCode(cycle.id);
-  await postToGeneral(visibleLog(code, "Action", `@Codex please approve and merge this PR when checks are green and the implementation satisfies the acceptance criteria: ${cycle.githubPrUrl}`), cycle.slackRootTs || undefined);
+  await postToGeneral(visibleLog(code, "Action", `${codexMention()} please approve and merge this PR when checks are green and the implementation satisfies the acceptance criteria: ${cycle.githubPrUrl}`), cycle.slackRootTs || undefined);
   await postToGeneral(visibleLog(code, "Waiting", "Merge requested autonomously. I will watch for GitHub merge and production Vercel deployment updates."), cycle.slackRootTs || undefined);
   return true;
 }

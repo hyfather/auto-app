@@ -9,7 +9,7 @@ AutoApp intentionally does **not** include an `/admin` UI. Slack is the control 
 
 ## v1 integration model
 
-- **Codex is the implementation worker.** AutoApp invokes Codex through Slack by posting a message that mentions `@Codex`; it does not call a Codex API.
+- **Codex is the implementation worker.** AutoApp invokes Codex through Slack by posting a message that mentions Codex with Slack mention syntax `<@U...>`; it does not call a Codex API.
 - **GitHub is the code/change-management facet.** PR, check, and merge state is read from GitHub Slack app messages in `#general`; v1 avoids direct GitHub API calls.
 - **Vercel is the deployment/runtime facet.** Deployment status is read from Vercel Slack notifications in `#general`; Vercel is treated as a passive notification source, not an interactive Slack bot. AutoApp does not ask `@Vercel` free-form status questions and does not call the Vercel API in v1.
 - **Slack is the intelligence/control plane.** All important activity flows through `SLACK_GENERAL_CHANNEL_ID`.
@@ -73,6 +73,7 @@ See `.env.example` for required and optional variables:
 - `SLACK_GENERAL_CHANNEL_ID`
 - `NEXT_PUBLIC_APP_URL`
 - Optional bot IDs: `AUTOAPP_BOT_USER_ID`, `CODEX_BOT_USER_ID`, `VERCEL_BOT_USER_ID`, `GITHUB_BOT_USER_ID`
+- `SLACK_CODEX_ID`: Codex Slack user ID without the leading `U`; AutoApp formats Codex tags as `<@U${SLACK_CODEX_ID}>`.
 - Future-only: `GITHUB_TOKEN`, `VERCEL_TOKEN`
 
 ## Public app
