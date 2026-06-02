@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AutoApp — The Self-Improving App Builder",
-  description: "Build elegant web apps that evolve from Slack. Control the brain via Slack, let users experience the polished UI on Vercel. Powered by shadcn/ui, Next.js, and continuous human-approved improvements.",
+  title: "AutoApp — Light Landing Page Refresh",
+  description: "A bright, SEO-focused product landing page for founders and teams that need clear positioning, mission-specific CTAs, and demo-ready copy without generated video.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
