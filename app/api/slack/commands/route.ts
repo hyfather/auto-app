@@ -3,10 +3,24 @@ import { after } from "next/server";
 import { handleAutoappCommand } from "@/lib/slack/handlers";
 import { verifySlackRequest } from "@/lib/slack/verify";
 
-// Commands that may call external APIs (observation + cloud agent launch) and
-// can exceed Slack's 3s slash-command budget. These are acknowledged instantly
-// and completed in the background, with the final reply delivered via response_url.
-const DEFERRED_COMMANDS = new Set(["start", "propose"]);
+// Fast subcommands that only touch the database and reliably reply within
+// Slack's 3s slash-command budget. Anything else — `start`, `propose`, and
+// freeform code-change requests that classify intent and launch a Cursor cloud
+// agent — is acknowledged instantly and finished in the background, with the
+// final reply delivered via response_url.
+const SYNCHRONOUS_COMMANDS = new Set([
+  "help",
+  "controls",
+  "status",
+  "mission",
+  "set-mission",
+  "pause",
+  "resume",
+  "abort",
+  "reset",
+  "fresh-start",
+  "summarize",
+]);
 
 async function postToResponseUrl(responseUrl: string, text: string) {
   try {
@@ -27,12 +41,13 @@ export async function POST(req: Request) {
   const form = new URLSearchParams(rawBody);
   const text = (form.get("text") || "help").trim();
   const responseUrl = form.get("response_url") || undefined;
+  const userId = form.get("user_id") || "unknown";
   const command = (text.split(/\s+/)[0] || "help").toLowerCase();
 
-  if (responseUrl && DEFERRED_COMMANDS.has(command)) {
+  if (responseUrl && !SYNCHRONOUS_COMMANDS.has(command)) {
     after(async () => {
       try {
-        const response = await handleAutoappCommand(text);
+        const response = await handleAutoappCommand(text, userId);
         await postToResponseUrl(responseUrl, response);
       } catch (error) {
         console.error("[Slack commands] Deferred command failed:", error instanceof Error ? error.message : error);
@@ -43,7 +58,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const response = await handleAutoappCommand(text);
+    const response = await handleAutoappCommand(text, userId);
     return NextResponse.json({ response_type: "ephemeral", text: response });
   } catch (error) {
     console.error("[Slack commands] Command failed:", error instanceof Error ? error.message : error);
