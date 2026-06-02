@@ -157,6 +157,17 @@ export async function getAgent(agentId: string): Promise<CursorAgent> {
   return cursorFetch<CursorAgent>(apiKey, `/v1/agents/${encodeURIComponent(agentId)}`);
 }
 
+/**
+ * Ask Cursor to stop/delete a running cloud agent. Used when a queued task is
+ * cancelled from Slack so we do not keep paying for an agent whose cycle was
+ * discarded. Best-effort: callers should not let a failure here block the
+ * local cancellation of the cycle.
+ */
+export async function deleteAgent(agentId: string): Promise<void> {
+  const { apiKey } = requireConfig();
+  await cursorFetch<unknown>(apiKey, `/v1/agents/${encodeURIComponent(agentId)}`, { method: "DELETE" });
+}
+
 /** Pull the first pull-request URL the agent has pushed, if any. */
 export function extractPrUrl(source: { git?: { branches?: CursorGitBranch[] } } | undefined): string | undefined {
   return source?.git?.branches?.find((branch) => branch.prUrl)?.prUrl;

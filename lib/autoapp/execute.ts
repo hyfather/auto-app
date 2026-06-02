@@ -4,6 +4,8 @@ import { postToGeneral } from "@/lib/slack/postMessage";
 import {
   CursorApiError,
   createCloudAgent,
+  createFollowupRun,
+  deleteAgent,
   extractPrUrl,
   getAgent,
   getRun,
@@ -22,6 +24,7 @@ import {
   type GitHubPullRequest,
   type PullRequestChecks,
 } from "@/lib/github/client";
+import { MAX_ACTIVE_CYCLES } from "./cycle";
 import { ACTIVE_CYCLE_STATUSES, DEFAULT_FORBIDDEN_AREAS, formatCycleCode, visibleLog } from "./policies";
 
 const AUTOAPP_ACTOR = "autoapp";
@@ -114,8 +117,8 @@ export async function autonomouslyApproveAndRequestAgent(cycleId: string): Promi
 }
 
 export async function requestQuickChangeAgent(request: string, userId: string, slackMessageTs?: string, threadTs?: string): Promise<
-  | { status: "started"; cycle: Cycle }
-  | { status: "active_cycle_exists"; cycle: Cycle }
+  | { status: "started"; cycle: Cycle; queueDepth: number }
+  | { status: "queue_full"; cycles: Cycle[]; max: number }
   | { status: "no_mission" }
 > {
   const quickChange = request.trim();
@@ -124,11 +127,11 @@ export async function requestQuickChangeAgent(request: string, userId: string, s
   const mission = await prisma.mission.findFirst({ where: { status: "active" }, orderBy: { updatedAt: "desc" } });
   if (!mission) return { status: "no_mission" };
 
-  const activeCycle = await prisma.cycle.findFirst({
-    where: { status: { in: [...ACTIVE_CYCLE_STATUSES] } },
-    orderBy: { updatedAt: "desc" },
-  });
-  if (activeCycle) return { status: "active_cycle_exists", cycle: activeCycle };
+  const activeCount = await prisma.cycle.count({ where: { status: { in: [...ACTIVE_CYCLE_STATUSES] } } });
+  if (activeCount >= MAX_ACTIVE_CYCLES) {
+    const cycles = await prisma.cycle.findMany({ where: { status: { in: [...ACTIVE_CYCLE_STATUSES] } }, orderBy: { createdAt: "asc" } });
+    return { status: "queue_full", cycles, max: MAX_ACTIVE_CYCLES };
+  }
 
   const cycle = await prisma.cycle.create({
     data: {
@@ -153,7 +156,7 @@ export async function requestQuickChangeAgent(request: string, userId: string, s
   const message = await postToGeneral(visibleLog(code, "Action", `Treating this as a direct code change without changing the active mission.\nRequest: ${quickChange}`), threadTs);
   if (!threadTs && message.ts) await prisma.cycle.update({ where: { id: cycle.id }, data: { slackRootTs: message.ts } });
   await approveAndRequestAgent(cycle.id, userId, slackMessageTs);
-  return { status: "started", cycle };
+  return { status: "started", cycle, queueDepth: activeCount + 1 };
 }
 
 /**
@@ -461,4 +464,77 @@ export async function completeCycle(cycleId: string, resultSummary: string) {
 export async function rejectCycle(cycleId: string, userId: string, slackMessageTs?: string) {
   await prisma.decision.create({ data: { cycleId, decision: "rejected", decidedBySlackUserId: userId, slackMessageTs, rationale: "Human rejected the proposed AutoApp cycle in Slack." } });
   return prisma.cycle.update({ where: { id: cycleId }, data: { status: "rejected", resultSummary: "Rejected by human in Slack before cloud agent execution." } });
+}
+
+/**
+ * Cancel a single queued/in-flight cycle without touching the mission or the
+ * other queued tasks. Marks the cycle rejected, records the decision, and makes
+ * a best-effort attempt to stop the backing Cursor cloud agent so we stop
+ * paying for work that was discarded.
+ */
+export async function cancelCycle(cycleId: string, userId: string = AUTOAPP_ACTOR, slackMessageTs?: string): Promise<{ cycle: Cycle; agentStopped: boolean }> {
+  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId } });
+  if (!cycle) throw new Error("No cycle found to cancel.");
+  const code = formatCycleCode(cycle.id);
+  const threadTs = cycle.slackRootTs || undefined;
+
+  let agentStopped = false;
+  if (cycle.cursorAgentId && isCursorConfigured()) {
+    try {
+      await deleteAgent(cycle.cursorAgentId);
+      agentStopped = true;
+    } catch (error) {
+      const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
+      await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_cancel_failed", payload: { cycleId, detail }, relatedCycleId: cycleId } });
+    }
+  }
+
+  await prisma.decision.create({ data: { cycleId, decision: "rejected", decidedBySlackUserId: userId, slackMessageTs, rationale: "Human cancelled this queued AutoApp task from Slack." } });
+  const updated = await prisma.cycle.update({ where: { id: cycleId }, data: { status: "rejected", resultSummary: `Cancelled from Slack${agentStopped ? " (Cursor cloud agent stopped)" : ""}.` } });
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "cycle_cancelled", payload: { cycleId, userId, agentStopped }, relatedCycleId: cycleId } });
+  await postToGeneral(visibleLog(code, "Action", `Cancelled this queued task at your request.${agentStopped ? " I asked Cursor to stop the cloud agent." : ""}`), threadTs);
+  return { cycle: updated, agentStopped };
+}
+
+/**
+ * Push updated instructions into an existing queued task. If the cycle has not
+ * launched yet (`proposed`) we just rewrite its proposal/acceptance so the
+ * pending launch uses the new text. If it already has a Cursor cloud agent, we
+ * send a follow-up run so the live agent incorporates the guidance.
+ */
+export async function addGuidanceToCycle(cycleId: string, guidance: string, userId: string = AUTOAPP_ACTOR): Promise<{ cycle: Cycle; mode: "rewrote_proposal" | "followup_run" | "recorded" }> {
+  const text = guidance.trim();
+  if (!text) throw new Error("Updated instructions are required.");
+  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId } });
+  if (!cycle) throw new Error("No cycle found to update.");
+  const code = formatCycleCode(cycle.id);
+  const threadTs = cycle.slackRootTs || undefined;
+
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "cycle_update_requested", payload: { cycleId, guidance: text, userId }, relatedCycleId: cycleId } });
+
+  if (cycle.status === "proposed") {
+    const updated = await prisma.cycle.update({
+      where: { id: cycleId },
+      data: {
+        proposal: text,
+        acceptanceCriteria: [`Implement the updated request: ${text}`, "Keep the diff small and focused", "Verify the changed behavior before opening or updating the PR"].join("\n"),
+      },
+    });
+    await postToGeneral(visibleLog(code, "Action", `Updated this task before launch.\nNew request: ${text}`), threadTs);
+    return { cycle: updated, mode: "rewrote_proposal" };
+  }
+
+  if (cycle.cursorAgentId && isCursorConfigured()) {
+    try {
+      await createFollowupRun(cycle.cursorAgentId, `Updated instructions for ${code}: ${text}\n\nPlease incorporate this into the work in progress and update the pull request accordingly.`);
+      await postToGeneral(visibleLog(code, "Action", `Sent your updated instructions to the running Cursor cloud agent.\nNew guidance: ${text}`), threadTs);
+      return { cycle, mode: "followup_run" };
+    } catch (error) {
+      const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
+      await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "cycle_followup_failed", payload: { cycleId, detail }, relatedCycleId: cycleId } });
+    }
+  }
+
+  await postToGeneral(visibleLog(code, "Waiting", `Recorded your updated guidance for this task: ${text}`), threadTs);
+  return { cycle, mode: "recorded" };
 }
