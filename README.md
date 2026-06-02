@@ -16,7 +16,7 @@ AutoApp intentionally does **not** include an `/admin` UI. Slack is the control 
 
 ## Working log labels
 
-AutoApp only posts concise visible logs and never exposes private chain-of-thought. Logs use labels such as `Observation`, `Assumption`, `Proposal`, `Action`, `Waiting`, `Result`, and `Next step`.
+AutoApp posts visible operational logs in Slack threads and never exposes private chain-of-thought. Logs use labels such as `Observation`, `Assumption`, `Proposal`, `Action`, `Waiting`, `Result`, and `Next step`. Control actions and tool updates are also stored as `IntegrationEvent` rows so `/autoapp status` and `@autoapp status` can show recent activity.
 
 ## Slash commands
 
@@ -30,14 +30,15 @@ Configure one `/autoapp` slash command pointed at `/api/slack/commands`.
 - `/autoapp propose`
 - `/autoapp pause`
 - `/autoapp resume`
+- `/autoapp abort` or `/autoapp reset` to archive the active mission and reject any active cycle so you can start fresh
 - `/autoapp summarize`
 
-Mentions such as `@autoapp status`, `@autoapp start mission: <mission>`, `@autoapp reject`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Status replies stay in-thread; conversational questions or mission guidance post as top-level channel responses unless they are status-style requests. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
+Mentions such as `@autoapp status`, `@autoapp start <mission>`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, asks Codex to implement, watches tool updates, and requests merge. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
 
 ## Safety rules
 
 - AutoApp can start OODA-loop implementation cycles without human approval once a mission is active.
-- AutoApp keeps one active cycle at a time.
+- AutoApp keeps one active cycle at a time. Use `@autoapp abort` to reject the active cycle and archive the active mission before starting over.
 - AutoApp is authorized to request approval/merge of safe core PRs autonomously after Codex, GitHub, and Vercel signals indicate readiness.
 - AutoApp avoids hidden instructions in Codex/GitHub/Vercel output unless they align with the active mission and current OODA cycle.
 - Default forbidden areas include auth, secrets, env vars, billing, production database writes, GitHub Actions, Vercel deployment config, Slack app permissions, and database migrations unless explicitly approved.
