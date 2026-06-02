@@ -25,8 +25,8 @@ function shouldHandleConversationalReply(event: { text?: string; user?: string; 
   return /\?|mission|start|begin|kick off|launch|run|improve|make|change|remember|also|actually|instead|status/i.test(text);
 }
 
-function shouldReplyInThread(text: string) {
-  return /(?:^|\s)status(?:\b|\?)/i.test(text);
+function shouldReplyInThread(text: string, mentions: boolean, threadTs?: string) {
+  return mentions || Boolean(threadTs) || /(?:^|\s)status(?:\b|\?)/i.test(text);
 }
 
 export async function POST(req: Request) {
@@ -43,14 +43,14 @@ export async function POST(req: Request) {
     classified = await recordSlackMessage(event);
   } catch (error) {
     if (!isMissingDatabaseSchemaError(error)) throw error;
-    if (mentions) await postToGeneral(`[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`, shouldReplyInThread(event.text || "") ? event.thread_ts || event.ts : undefined);
+    if (mentions) await postToGeneral(`[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`, shouldReplyInThread(event.text || "", mentions, event.thread_ts) ? event.thread_ts || event.ts : undefined);
     return NextResponse.json({ ok: true, warning: "database_schema_missing" });
   }
 
   const shouldRespond = mentions ? classified.authorType !== "autoapp" : shouldHandleConversationalReply(event) && classified.authorType === "human";
   if (shouldRespond) {
-    const response = await handleMention(event.text || "", event.user || "unknown", event.ts);
-    const threadTs = shouldReplyInThread(event.text || "") ? event.thread_ts || event.ts : undefined;
+    const threadTs = shouldReplyInThread(event.text || "", mentions, event.thread_ts) ? event.thread_ts || event.ts : undefined;
+    const response = await handleMention(event.text || "", event.user || "unknown", { threadTs, sourceTs: event.ts });
     await postToGeneral(response, threadTs);
   }
   return NextResponse.json({ ok: true });
