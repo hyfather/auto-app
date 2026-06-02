@@ -6,6 +6,7 @@ import { abortActiveMission, getActiveMission, incorporateMissionInput, pauseMis
 import { runObservationCycle } from "@/lib/autoapp/observe";
 import { summarizeLatestCycle } from "@/lib/autoapp/summarize";
 import { formatCycleCode } from "@/lib/autoapp/policies";
+import { summarizeLastDeployment, summarizePullRequests, type PullRequestState } from "@/lib/github/overview";
 import { classifySlackMessage } from "./classifySlackMessage";
 import { answerGeneralQuestion, classifySlackMentionIntent, SlackIntentUnavailableError } from "./intent";
 import { parseToolUpdate } from "./parseToolUpdate";
@@ -23,9 +24,19 @@ const HELP_TEXT = [
   "• `/autoapp cancel <task>` — cancel one queued task and stop its Cursor agent.",
   "• `/autoapp abort` — discard the whole mission and every active task to start fresh.",
   "",
+  "*GitHub status (`/autoapp` slash command):*",
+  "• `/autoapp prs [open|closed|all]` — list pull requests with their current state and CI checks (aliases: `pulls`, `pr`).",
+  "• `/autoapp deployments` — show when the last deployment happened and its state (aliases: `deploys`, `deployment`).",
+  "• `/autoapp github` — combined snapshot of open PRs and the latest deployment (alias: `gh`).",
+  "",
   "*Other controls:* `/autoapp status`, `mission`, `set-mission <text>`, `start [mission]`, `pause`, `resume`, `summarize`, `help`.",
-  "Mentions like `@autoapp queue`, `@autoapp cancel AUTO-AB12CD`, `@autoapp status`, and `@autoapp start <mission>` work too. Mention replies stay in the Slack thread and AutoApp streams OODA progress there.",
+  "`status` now also fetches every open PR with its state and shows the last deployment.",
+  "Mentions like `@autoapp queue`, `@autoapp cancel AUTO-AB12CD`, `@autoapp status`, `@autoapp prs`, `@autoapp deployments`, and `@autoapp start <mission>` work too. Mention replies stay in the Slack thread and AutoApp streams OODA progress there.",
 ].join("\n");
+
+// Bound GitHub enrichment so the synchronous `status`/`prs`/`deployments`
+// replies never blow Slack's 3s slash-command budget when the API is slow.
+const GITHUB_LOOKUP_TIMEOUT_MS = 2500;
 
 type HandlerOptions = { threadTs?: string; sourceTs?: string };
 type CycleListItem = Pick<Cycle, "id" | "status" | "proposal"> & { githubPrUrl?: string | null };
@@ -54,6 +65,20 @@ async function handleAutoappCommandUnsafe(text: string, userId: string): Promise
       return HELP_TEXT;
     case "status":
       return getStatusText();
+    case "prs":
+    case "pulls":
+    case "pull-requests":
+    case "pullrequests":
+    case "pr":
+      return getPullRequestsText(arg);
+    case "deployments":
+    case "deployment":
+    case "deploys":
+    case "deploy":
+      return getDeploymentText();
+    case "github":
+    case "gh":
+      return getGitHubOverviewText();
     case "mission": {
       const mission = await getActiveMission();
       return mission ? `Current mission: ${mission.title}\nStatus: ${mission.status}\nGuidance:\n${mission.description}` : "No active mission. Use `/autoapp set-mission <mission>` or say `@autoapp start <mission>`.";
@@ -143,7 +168,42 @@ export async function getStatusText() {
   const snapshot = mission ? await prisma.webAppSnapshot.findFirst({ where: { missionId: mission.id }, orderBy: { createdAt: "desc" } }) : null;
   const recentLogs = await prisma.integrationEvent.findMany({ orderBy: { createdAt: "desc" }, take: 5 });
   const queue = cycles.length ? formatCycleList(cycles) : "* none";
-  return `[Status]\nMission: ${mission?.title ? `"${mission.title}"` : "none"}\nMission status: ${mission?.status || "n/a"}\nLatest web app snapshot: ${snapshot ? `${snapshot.alignmentScore ?? "unknown"}/100 — ${snapshot.evaluationSummary}` : "none"}\nActive tasks (${cycles.length}/${MAX_ACTIVE_CYCLES}):\n${queue}\nRecent logs:\n${recentLogs.map((log) => `* ${log.createdAt.toISOString()} ${log.source}/${log.eventType}`).join("\n") || "* none"}`;
+  const [pullRequests, lastDeployment] = await Promise.all([
+    summarizePullRequests({ state: "open", withChecks: true, limit: 10, timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS }),
+    summarizeLastDeployment({ timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS }),
+  ]);
+  return `[Status]\nMission: ${mission?.title ? `"${mission.title}"` : "none"}\nMission status: ${mission?.status || "n/a"}\nLatest web app snapshot: ${snapshot ? `${snapshot.alignmentScore ?? "unknown"}/100 — ${snapshot.evaluationSummary}` : "none"}\nActive tasks (${cycles.length}/${MAX_ACTIVE_CYCLES}):\n${queue}\nOpen pull requests:\n${indentLines(pullRequests)}\nLast deployment: ${lastDeployment}\nRecent logs:\n${recentLogs.map((log) => `* ${log.createdAt.toISOString()} ${log.source}/${log.eventType}`).join("\n") || "* none"}`;
+}
+
+/** Indent a possibly multi-line GitHub summary so it nests under a status heading. */
+function indentLines(text: string): string {
+  return text.includes("\n") || text.startsWith("*") ? text : `* ${text}`;
+}
+
+function parsePullRequestState(arg: string): PullRequestState {
+  const value = arg.trim().toLowerCase();
+  if (value === "closed") return "closed";
+  if (value === "all" || value === "merged") return "all";
+  return "open";
+}
+
+async function getPullRequestsText(arg: string): Promise<string> {
+  const state = parsePullRequestState(arg);
+  const body = await summarizePullRequests({ state, withChecks: true, limit: 20, timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS });
+  return `[Pull requests${state === "open" ? "" : ` · ${state}`}]\n${body}`;
+}
+
+async function getDeploymentText(): Promise<string> {
+  const body = await summarizeLastDeployment({ timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS });
+  return `[Deployment]\nLast deployment: ${body}`;
+}
+
+async function getGitHubOverviewText(): Promise<string> {
+  const [pullRequests, lastDeployment] = await Promise.all([
+    summarizePullRequests({ state: "open", withChecks: true, limit: 20, timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS }),
+    summarizeLastDeployment({ timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS }),
+  ]);
+  return `[GitHub]\nOpen pull requests:\n${indentLines(pullRequests)}\nLast deployment: ${lastDeployment}`;
 }
 
 async function startAutonomousCycleText(options: HandlerOptions = {}): Promise<string> {
@@ -277,6 +337,10 @@ async function handleClassifiedControl(action: string, userId: string, options: 
       return HELP_TEXT;
     case "status":
       return getStatusText();
+    case "prs":
+      return getPullRequestsText(request);
+    case "deployments":
+      return getDeploymentText();
     case "queue":
       return listActiveCyclesText();
     case "cancel":
