@@ -13,7 +13,7 @@ export async function setActiveMission(text: string) {
     data: {
       title: missionText,
       description: missionText,
-      successCriteria: "AutoApp should repeatedly run an OODA loop from Slack, improve the public Vercel app through small Codex PRs, and autonomously merge safe core changes that satisfy acceptance criteria.",
+      successCriteria: "AutoApp should repeatedly run an OODA loop from Slack, improve the public Vercel app through small cloud-agent PRs, and autonomously merge safe core changes that satisfy acceptance criteria.",
       status: "active",
     },
   });
@@ -71,7 +71,7 @@ export async function abortActiveMission(userId = "autoapp", slackMessageTs?: st
           "proposed",
           "approved",
           "running",
-          "waiting_for_codex",
+          "waiting_for_agent",
           "pr_opened",
           "waiting_for_checks",
           "waiting_for_preview_deploy",

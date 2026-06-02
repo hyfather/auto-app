@@ -18,7 +18,7 @@ enum CycleStatus {
   proposed
   approved
   running
-  waiting_for_codex
+  waiting_for_agent
   pr_opened
   waiting_for_checks
   waiting_for_preview_deploy
@@ -40,7 +40,7 @@ enum RiskLevel {
 enum AuthorType {
   human
   autoapp
-  codex
+  cursor
   github
   vercel
   unknown
@@ -50,7 +50,7 @@ enum MemoryClassification {
   human_instruction
   human_approval
   human_rejection
-  codex_update
+  cursor_update
   github_update
   vercel_update
   autoapp_log
@@ -70,7 +70,7 @@ enum DecisionType {
 
 enum IntegrationSource {
   slack
-  codex
+  cursor
   github
   vercel
   autoapp
@@ -101,7 +101,9 @@ model Cycle {
   acceptanceCriteria  String
   forbiddenAreas      String
   slackRootTs         String?
-  codexRequestTs      String?
+  cursorAgentId       String?
+  cursorRunId         String?
+  cursorAgentUrl      String?
   githubPrUrl         String?
   vercelPreviewUrl    String?
   vercelProductionUrl String?

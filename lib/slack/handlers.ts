@@ -1,7 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { getActiveCycle } from "@/lib/autoapp/cycle";
-import { approveAndRequestCodex, autonomouslyApproveAndRequestCodex, completeCycle, rejectCycle, requestAutonomousMergeIfReady } from "@/lib/autoapp/execute";
+import { approveAndRequestAgent, autonomouslyApproveAndRequestAgent, completeCycle, rejectCycle, requestAutonomousMergeIfReady } from "@/lib/autoapp/execute";
 import { abortActiveMission, getActiveMission, incorporateMissionInput, pauseMission, resumeLatestMission, setActiveMission } from "@/lib/autoapp/mission";
 import { runObservationCycle } from "@/lib/autoapp/observe";
 import { summarizeLatestCycle } from "@/lib/autoapp/summarize";
@@ -80,13 +80,13 @@ export async function getStatusText() {
 async function startAutonomousCycleText(options: HandlerOptions = {}): Promise<string> {
   if (options.threadTs) await postToGeneral("[AutoApp] Start received. I’ll keep every update in this thread.", options.threadTs);
   const result = await runObservationCycle({ post: true, threadTs: options.threadTs });
-  if (result.status === "active_cycle_exists") return `I already have an active OODA cycle (${result.cycle.status}). I’ll keep watching its thread for Codex/GitHub/Vercel updates. Use \`@autoapp abort\` if you want to discard it and start fresh.`;
+  if (result.status === "active_cycle_exists") return `I already have an active OODA cycle (${result.cycle.status}). I’ll keep watching the Cursor cloud agent plus GitHub/Vercel updates. Use \`@autoapp abort\` if you want to discard it and start fresh.`;
   if (result.status === "no_mission") return "I need a mission first. Say `@autoapp start <what to build>` or `/autoapp set-mission <mission>`.";
   if (result.status === "paused") return "The mission is paused. Use `@autoapp resume` when you want me to continue, or `@autoapp abort` to start fresh.";
-  if (options.threadTs) await postToGeneral("[AutoApp] Proposal recorded. Asking Codex to implement now...", options.threadTs);
-  await autonomouslyApproveAndRequestCodex(result.cycle.id);
+  if (options.threadTs) await postToGeneral("[AutoApp] Proposal recorded. Launching a Cursor cloud agent to implement now...", options.threadTs);
+  await autonomouslyApproveAndRequestAgent(result.cycle.id);
   await logAutoappEvent("cycle_started", { cycleId: result.cycle.id, threadTs: options.threadTs, sourceTs: options.sourceTs });
-  return "Started an autonomous OODA cycle: observed the app, oriented around the mission, decided on the next small change, and asked Codex to implement it. I’ll stream follow-up logs in this thread and request merge when it looks ready.";
+  return "Started an autonomous OODA cycle: observed the app, oriented around the mission, decided on the next small change, and launched a Cursor cloud agent to implement it. I’ll stream follow-up logs in this thread and request merge when it looks ready.";
 }
 
 function missionFromMention(text: string) {
@@ -126,16 +126,16 @@ export async function handleMention(text: string, userId: string, options: Handl
   if (/approve|approved|yes|proceed|go ahead/.test(lower)) {
     const cycle = await getActiveCycle();
     if (!cycle || cycle.status !== "proposed") return "No proposed cycle is waiting for approval. I’m already allowed to start and merge safe OODA-loop changes autonomously.";
-    await approveAndRequestCodex(cycle.id, userId, options.sourceTs);
+    await approveAndRequestAgent(cycle.id, userId, options.sourceTs);
     await logAutoappEvent("cycle_approved", { cycleId: cycle.id, userId, threadTs: options.threadTs });
-    return "Approval recorded. Codex request posted in this thread.";
+    return "Approval recorded. I launched a Cursor cloud agent to implement it; progress will stream in this thread.";
   }
   if (/reject|\bno\b|stop|cancel|do not/.test(lower)) {
     const cycle = await getActiveCycle();
     if (!cycle) return "No active cycle to reject.";
     await rejectCycle(cycle.id, userId, options.sourceTs);
     await logAutoappEvent("cycle_rejected", { cycleId: cycle.id, userId, threadTs: options.threadTs });
-    return "Rejection recorded. I will not ask Codex to implement that proposal. Use `@autoapp start` for another cycle or `@autoapp abort` to clear the mission.";
+    return "Rejection recorded. I will not launch a cloud agent to implement that proposal. Use `@autoapp start` for another cycle or `@autoapp abort` to clear the mission.";
   }
   if (/pause/.test(lower)) return handleAutoappCommand("pause");
   if (/resume/.test(lower)) return handleAutoappCommand("resume");
@@ -182,7 +182,7 @@ async function updateCycleFromTool(cycleId: string, tool: ReturnType<typeof pars
   if (tool.prUrl) data.githubPrUrl = tool.prUrl;
   if (tool.deploymentUrl && tool.eventType.startsWith("preview")) data.vercelPreviewUrl = tool.deploymentUrl;
   if (tool.deploymentUrl && tool.eventType.startsWith("production")) data.vercelProductionUrl = tool.deploymentUrl;
-  const statusMap: Record<string, string> = { codex_failed: "failed", pr_opened: "pr_opened", checks_started: "waiting_for_checks", checks_passed: "waiting_for_preview_deploy", checks_failed: "failed", pr_merged: "waiting_for_production_deploy", preview_deployment_started: "waiting_for_preview_deploy", preview_deployment_ready: "preview_deployed", preview_deployment_failed: "failed", production_deployment_started: "waiting_for_production_deploy", production_deployment_ready: "completed", production_deployment_failed: "failed" };
+  const statusMap: Record<string, string> = { pr_opened: "pr_opened", checks_started: "waiting_for_checks", checks_passed: "waiting_for_preview_deploy", checks_failed: "failed", pr_merged: "waiting_for_production_deploy", preview_deployment_started: "waiting_for_preview_deploy", preview_deployment_ready: "preview_deployed", preview_deployment_failed: "failed", production_deployment_started: "waiting_for_production_deploy", production_deployment_ready: "completed", production_deployment_failed: "failed" };
   if (statusMap[tool.eventType]) data.status = statusMap[tool.eventType];
   if (Object.keys(data).length) await prisma.cycle.update({ where: { id: cycleId }, data });
   await logAutoappEvent("tool_update", { cycleId, tool });
