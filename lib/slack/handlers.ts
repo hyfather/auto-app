@@ -1,17 +1,18 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { getActiveCycle } from "@/lib/autoapp/cycle";
-import { approveAndRequestAgent, autonomouslyApproveAndRequestAgent, completeCycle, rejectCycle, requestAutonomousMergeIfReady } from "@/lib/autoapp/execute";
+import { approveAndRequestAgent, autonomouslyApproveAndRequestAgent, completeCycle, rejectCycle, requestAutonomousMergeIfReady, requestQuickChangeAgent } from "@/lib/autoapp/execute";
 import { abortActiveMission, getActiveMission, incorporateMissionInput, pauseMission, resumeLatestMission, setActiveMission } from "@/lib/autoapp/mission";
 import { runObservationCycle } from "@/lib/autoapp/observe";
 import { summarizeLatestCycle } from "@/lib/autoapp/summarize";
 import { classifySlackMessage } from "./classifySlackMessage";
+import { answerGeneralQuestion, classifySlackMentionIntent } from "./intent";
 import { parseToolUpdate } from "./parseToolUpdate";
 import { postToGeneral } from "./postMessage";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
 const conversationalPrefixes = /^(?:please\s+)?(?:start(?:\s+on)?|begin|kick off|launch|run)\s+(?:(?:a\s+)?mission\s*:?:?\s*)?/i;
-const HELP_TEXT = "AutoApp controls: `@autoapp start [mission]`, `status`, `mission`, `set mission to <text>`, `pause`, `resume`, `abort`, `summarize`, `help`. Slash commands still work: `/autoapp status`, `/autoapp start <mission>`, `/autoapp abort`. Mention replies always stay in the Slack thread and AutoApp streams OODA progress there.";
+const HELP_TEXT = "AutoApp controls: `@autoapp start [mission]`, `status`, `mission`, `set mission to <text>`, `pause`, `resume`, `abort`, `summarize`, `help`. Ask for a focused code change, like `@autoapp make the landing page default to light mode`, and AutoApp will launch Cursor without changing the mission. Slash commands still work: `/autoapp status`, `/autoapp start <mission>`, `/autoapp abort`. Mention replies always stay in the Slack thread and AutoApp streams OODA progress there.";
 
 type HandlerOptions = { threadTs?: string; sourceTs?: string };
 
@@ -89,6 +90,15 @@ async function startAutonomousCycleText(options: HandlerOptions = {}): Promise<s
   return "Started an autonomous OODA cycle: observed the app, oriented around the mission, decided on the next small change, and launched a Cursor cloud agent to implement it. I’ll stream follow-up logs in this thread, watch the PR through GitHub, and merge it through the GitHub API when ready.";
 }
 
+async function startQuickChangeCycleText(request: string, userId: string, options: HandlerOptions = {}): Promise<string> {
+  if (options.threadTs) await postToGeneral("[AutoApp] Quick code-change request received. I’ll keep updates in this thread and leave the mission unchanged.", options.threadTs);
+  const result = await requestQuickChangeAgent(request, userId, options.sourceTs, options.threadTs);
+  if (result.status === "active_cycle_exists") return `I already have an active implementation cycle (${result.cycle.status}). I did not change the mission. Use \`@autoapp abort\` if you want to discard it before starting this quick change.`;
+  if (result.status === "no_mission") return "I can launch quick code changes once there is an active mission to attach the cycle to. Set one with `@autoapp start <mission>` or `/autoapp set-mission <mission>`.";
+  await logAutoappEvent("quick_change_started", { cycleId: result.cycle.id, request, threadTs: options.threadTs, sourceTs: options.sourceTs });
+  return "Got it — I treated that as a quick code change, left the active mission unchanged, and launched a Cursor cloud agent to implement it. I’ll watch the PR and stream progress in this thread.";
+}
+
 function missionFromMention(text: string) {
   const cleaned = stripAutoappMention(text);
   return cleaned.match(/set (?:the )?mission to (.+)$/i)?.[1]?.trim()
@@ -140,6 +150,9 @@ export async function handleMention(text: string, userId: string, options: Handl
   if (/pause/.test(lower)) return handleAutoappCommand("pause");
   if (/resume/.test(lower)) return handleAutoappCommand("resume");
   if (/summarize|summary/.test(lower)) return summarizeLatestCycle();
+  const intent = await classifySlackMentionIntent(cleaned);
+  if (intent.kind === "code_change" && intent.confidence >= 0.55) return startQuickChangeCycleText(intent.request, userId, options);
+  if (intent.kind === "question" && intent.confidence >= 0.55) return answerQuestion(cleaned);
   if (/\b(start|begin|kick off|launch|run)\b|propose|improve/.test(lower) && cleaned.length < 80) return startAutonomousCycleText(options);
   if (/\?$/.test(cleaned)) return answerQuestion(cleaned);
   return incorporateGuidanceAndMaybeStart(cleaned);
@@ -156,8 +169,8 @@ async function abortMissionText(userId: string, slackMessageTs?: string, threadT
 
 async function answerQuestion(question: string): Promise<string> {
   const status = await getStatusText();
-  if (/what|how|where|why|when|who|mission|cycle|deploy|pr|status/i.test(question)) return `${status}\n\nShort answer: I’m operating from Slack as the control plane. Mention me in #general, e.g. \`@autoapp start\`, and I’ll keep the response stream in that thread. Use \`@autoapp abort\` to discard the active mission/cycle and start fresh.`;
-  return "I’m here. Ask for `status`, tell me how to adjust the mission, say `start`, or say `abort` to clear the active mission and cycle.";
+  if (/mission|cycle|deploy|deployment|pr|pull request|status|working on|logs?|how do i use|what can you do|control|command/i.test(question)) return `${status}\n\nShort answer: I’m operating from Slack as the control plane. Mention me in #general, e.g. \`@autoapp start\`, and I’ll keep the response stream in that thread. Use \`@autoapp abort\` to discard the active mission/cycle and start fresh.`;
+  return answerGeneralQuestion(question);
 }
 
 export async function recordSlackMessage(event: { text?: string; user?: string; bot_id?: string; channel?: string; ts?: string; thread_ts?: string }) {

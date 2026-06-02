@@ -22,7 +22,7 @@ import {
   type GitHubPullRequest,
   type PullRequestChecks,
 } from "@/lib/github/client";
-import { formatCycleCode, visibleLog } from "./policies";
+import { ACTIVE_CYCLE_STATUSES, DEFAULT_FORBIDDEN_AREAS, formatCycleCode, visibleLog } from "./policies";
 
 const AUTOAPP_ACTOR = "autoapp";
 const ACTIVE_PR_STATUSES = ["waiting_for_agent", "pr_opened", "waiting_for_checks", "waiting_for_preview_deploy", "preview_deployed", "waiting_for_merge"] as const;
@@ -111,6 +111,49 @@ export async function approveAndRequestAgent(cycleId: string, userId: string = A
 
 export async function autonomouslyApproveAndRequestAgent(cycleId: string): Promise<void> {
   return approveAndRequestAgent(cycleId, AUTOAPP_ACTOR);
+}
+
+export async function requestQuickChangeAgent(request: string, userId: string, slackMessageTs?: string, threadTs?: string): Promise<
+  | { status: "started"; cycle: Cycle }
+  | { status: "active_cycle_exists"; cycle: Cycle }
+  | { status: "no_mission" }
+> {
+  const quickChange = request.trim();
+  if (!quickChange) throw new Error("Quick-change request is required.");
+
+  const mission = await prisma.mission.findFirst({ where: { status: "active" }, orderBy: { updatedAt: "desc" } });
+  if (!mission) return { status: "no_mission" };
+
+  const activeCycle = await prisma.cycle.findFirst({
+    where: { status: { in: [...ACTIVE_CYCLE_STATUSES] } },
+    orderBy: { updatedAt: "desc" },
+  });
+  if (activeCycle) return { status: "active_cycle_exists", cycle: activeCycle };
+
+  const cycle = await prisma.cycle.create({
+    data: {
+      missionId: mission.id,
+      status: "proposed",
+      observation: `Direct Slack quick-change request under the active mission "${mission.title}". This request should not alter the mission text.`,
+      proposal: quickChange,
+      rationale: "A human asked for a focused implementation change in Slack. AutoApp should dispatch it directly without folding it into mission guidance.",
+      riskLevel: "low",
+      acceptanceCriteria: [
+        `Implement the Slack-requested change: ${quickChange}`,
+        "Keep the active mission unchanged",
+        "Keep the diff small and focused",
+        "Verify the changed behavior before opening or updating the PR",
+      ].join("\n"),
+      forbiddenAreas: DEFAULT_FORBIDDEN_AREAS.join("\n"),
+      slackRootTs: threadTs,
+    },
+  });
+  const code = formatCycleCode(cycle.id);
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "quick_change_requested", payload: { cycleId: cycle.id, request: quickChange, userId, threadTs }, relatedCycleId: cycle.id } });
+  const message = await postToGeneral(visibleLog(code, "Action", `Treating this as a direct code change without changing the active mission.\nRequest: ${quickChange}`), threadTs);
+  if (!threadTs && message.ts) await prisma.cycle.update({ where: { id: cycle.id }, data: { slackRootTs: message.ts } });
+  await approveAndRequestAgent(cycle.id, userId, slackMessageTs);
+  return { status: "started", cycle };
 }
 
 /**

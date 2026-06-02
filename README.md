@@ -35,6 +35,8 @@ Configure one `/autoapp` slash command pointed at `/api/slack/commands`.
 
 Mentions such as `@autoapp status`, `@autoapp start <mission>`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, launches a Cursor cloud agent to implement, watches the GitHub PR, and merges it when ready. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
 
+AutoApp also classifies direct mention intent. Focused code-change requests such as `@autoapp can you make sure the default theme is light mode on the landing page?` create a quick implementation cycle and launch a Cursor cloud agent without altering the active mission. General questions such as `@autoapp what's the weather?` get an in-thread answer without starting a Cursor job. OpenAI backs this classifier when `OPENAI_API_KEY` is configured, with deterministic fallbacks for local/dev use.
+
 The events and slash-command endpoints acknowledge Slack within its timeout window and process work in the background (`after()`), verify request signatures with replay protection, de-duplicate Slack retries, and never let a Slack/API failure crash the handler.
 
 ## Safety rules
@@ -71,6 +73,8 @@ See `.env.example` for required and optional variables:
 
 - `DATABASE_URL`
 - `OPENAI_API_KEY`
+- `OPENAI_SLACK_INTENT_MODEL` (optional): OpenAI model used to classify Slack mention intent; defaults to `gpt-4o-mini`.
+- `OPENAI_SLACK_ANSWER_MODEL` (optional): OpenAI model used for concise general Slack answers; defaults to `gpt-4o-mini`.
 - `SLACK_BOT_TOKEN`
 - `SLACK_SIGNING_SECRET`
 - `SLACK_APP_TOKEN` if Socket Mode is later used
