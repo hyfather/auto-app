@@ -184,7 +184,7 @@ function repoPath(repository: GitHubRepository): string {
   return `/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.repo)}`;
 }
 
-function configuredMergeMethod(): "merge" | "squash" | "rebase" {
+export function configuredMergeMethod(): "merge" | "squash" | "rebase" {
   const method = process.env.GITHUB_MERGE_METHOD?.trim();
   return method === "merge" || method === "rebase" ? method : "squash";
 }

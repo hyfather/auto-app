@@ -13,6 +13,7 @@ import {
   isTerminalRunStatus,
 } from "@/lib/cursor/client";
 import {
+  configuredMergeMethod,
   GitHubApiError,
   getGitHubRepository,
   getPullRequest,
@@ -29,6 +30,29 @@ import { ACTIVE_CYCLE_STATUSES, DEFAULT_FORBIDDEN_AREAS, formatCycleCode, visibl
 
 const AUTOAPP_ACTOR = "autoapp";
 const ACTIVE_PR_STATUSES = ["waiting_for_agent", "pr_opened", "waiting_for_checks", "waiting_for_preview_deploy", "preview_deployed", "waiting_for_merge"] as const;
+
+/** Whether the cloud agent should turn on GitHub native auto-merge for its PR. */
+export function autoMergeEnabled(): boolean {
+  return process.env.GITHUB_PR_AUTO_MERGE !== "false";
+}
+
+/**
+ * Instruction appended to the implementation prompt that asks the Cursor cloud
+ * agent to enable GitHub's native auto-merge on the PR it opens, so the PR
+ * merges itself once all required status checks pass. AutoApp still watches and
+ * merges the PR through the GitHub API as a fallback, so this is best-effort.
+ */
+export function autoMergeInstruction(): string {
+  if (!autoMergeEnabled()) return "";
+  const method = configuredMergeMethod();
+  return [
+    "",
+    "Enable auto-merge so the pull request merges automatically once all required GitHub checks pass:",
+    `* After opening the PR, enable GitHub native auto-merge with the GitHub CLI: \`gh pr merge --auto --${method} <pr-url-or-number>\``,
+    "* Do not merge the PR yourself and do not bypass checks — GitHub must merge it only after every required status check passes",
+    "* If auto-merge cannot be enabled (e.g. the repository does not allow auto-merge or has no required checks), leave the PR open and note it in the PR description; AutoApp will still watch the checks and merge through the GitHub API",
+  ].join("\n");
+}
 
 function buildImplementationPrompt(cycle: Cycle & { mission: Mission }, code: string): string {
   const constraints = cycle.forbiddenAreas
@@ -61,7 +85,8 @@ ${constraints}
 * Do not modify auth, secrets, environment variables, billing, or deployment configuration
 
 Acceptance criteria:
-${acceptance}`;
+${acceptance}
+${autoMergeInstruction()}`;
 }
 
 /**
@@ -103,7 +128,10 @@ export async function approveAndRequestAgent(cycleId: string, userId: string = A
     });
     await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_launched", payload: { cycleId, agentId: agent.id, runId: run.id, url: agent.url ?? null }, relatedCycleId: cycleId } });
     await postToGeneral(visibleLog(code, "Action", `Launched a Cursor cloud agent to implement ${code}.${agent.url ? `\nAgent: ${agent.url}` : ""}`), threadTs);
-    await postToGeneral(visibleLog(code, "Waiting", "The cloud agent is implementing the change and will open a PR. I will watch Cursor for the PR link, then watch and merge the PR through the GitHub API."), threadTs);
+    const mergePlan = autoMergeEnabled()
+      ? "The cloud agent is implementing the change and will open a PR with GitHub auto-merge enabled, so it merges once all required checks pass. I will also watch the PR and merge it through the GitHub API as a fallback."
+      : "The cloud agent is implementing the change and will open a PR. I will watch Cursor for the PR link, then watch and merge the PR through the GitHub API.";
+    await postToGeneral(visibleLog(code, "Waiting", mergePlan), threadTs);
   } catch (error) {
     const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
     await prisma.cycle.update({ where: { id: cycleId }, data: { status: "failed", resultSummary: `Failed to launch Cursor cloud agent: ${detail}` } });
