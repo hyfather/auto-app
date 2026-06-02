@@ -6,8 +6,18 @@ import { runObservationCycle } from "@/lib/autoapp/observe";
 import { summarizeLatestCycle } from "@/lib/autoapp/summarize";
 import { classifySlackMessage } from "./classifySlackMessage";
 import { parseToolUpdate } from "./parseToolUpdate";
+import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
 export async function handleAutoappCommand(text: string) {
+  try {
+    return await handleAutoappCommandUnsafe(text);
+  } catch (error) {
+    if (isMissingDatabaseSchemaError(error)) return `[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`;
+    throw error;
+  }
+}
+
+async function handleAutoappCommandUnsafe(text: string) {
   const trimmed = text.trim();
   const [command, ...rest] = trimmed.split(/\s+/);
   const arg = rest.join(" ").trim();
