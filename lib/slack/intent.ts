@@ -1,6 +1,6 @@
 import { getOpenAIClient } from "@/lib/ai/openai";
 
-export type SlackControlAction = "help" | "status" | "mission" | "start" | "pause" | "resume" | "abort" | "summarize" | "approve" | "reject" | "none";
+export type SlackControlAction = "help" | "status" | "mission" | "start" | "pause" | "resume" | "abort" | "summarize" | "approve" | "reject" | "queue" | "cancel" | "none";
 
 export type SlackMentionIntent = {
   kind: "code_change" | "question" | "mission_update" | "control" | "unknown";
@@ -31,7 +31,9 @@ export async function classifySlackMentionIntent(text: string): Promise<SlackMen
             "Classify a Slack message sent to AutoApp.",
             "Return only JSON with keys: kind, confidence, request, controlAction.",
             "kind must be one of: code_change, question, mission_update, control, unknown.",
-            "controlAction must be one of: help, status, mission, start, pause, resume, abort, summarize, approve, reject, none.",
+            "controlAction must be one of: help, status, mission, start, pause, resume, abort, summarize, approve, reject, queue, cancel, none.",
+            "Use control with controlAction=queue when the user wants to list/see current tasks, the queue, or what AutoApp is working on.",
+            "Use control with controlAction=cancel when the user wants to cancel/stop/kill a specific queued task (e.g. mentions an AUTO-XXXXXX code or a task number); keep that code/number in request.",
             "Use code_change when the user asks AutoApp to implement or modify app/code/UI/config behavior.",
             "Use question for general knowledge or conversational questions that should be answered in Slack without starting a Cursor agent.",
             "Use mission_update only when the user wants to set or replace AutoApp's active mission; put the mission text in request.",
@@ -96,7 +98,7 @@ function isValidIntentKind(kind: unknown): kind is SlackMentionIntent["kind"] {
 }
 
 function isValidControlAction(action: unknown): action is SlackControlAction {
-  return action === "help" || action === "status" || action === "mission" || action === "start" || action === "pause" || action === "resume" || action === "abort" || action === "summarize" || action === "approve" || action === "reject" || action === "none";
+  return action === "help" || action === "status" || action === "mission" || action === "start" || action === "pause" || action === "resume" || action === "abort" || action === "summarize" || action === "approve" || action === "reject" || action === "queue" || action === "cancel" || action === "none";
 }
 
 function clampConfidence(value: unknown): number {

@@ -1,19 +1,34 @@
-import type { Prisma } from "@prisma/client";
+import type { Cycle, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
-import { getActiveCycle } from "@/lib/autoapp/cycle";
-import { approveAndRequestAgent, autonomouslyApproveAndRequestAgent, completeCycle, rejectCycle, requestAutonomousMergeIfReady, requestQuickChangeAgent } from "@/lib/autoapp/execute";
+import { findActiveCycleByReference, getActiveCycle, getActiveCycles, MAX_ACTIVE_CYCLES } from "@/lib/autoapp/cycle";
+import { addGuidanceToCycle, approveAndRequestAgent, autonomouslyApproveAndRequestAgent, cancelCycle, completeCycle, rejectCycle, requestAutonomousMergeIfReady, requestQuickChangeAgent } from "@/lib/autoapp/execute";
 import { abortActiveMission, getActiveMission, incorporateMissionInput, pauseMission, resumeLatestMission, setActiveMission } from "@/lib/autoapp/mission";
 import { runObservationCycle } from "@/lib/autoapp/observe";
 import { summarizeLatestCycle } from "@/lib/autoapp/summarize";
+import { formatCycleCode } from "@/lib/autoapp/policies";
 import { classifySlackMessage } from "./classifySlackMessage";
 import { answerGeneralQuestion, classifySlackMentionIntent, SlackIntentUnavailableError } from "./intent";
 import { parseToolUpdate } from "./parseToolUpdate";
 import { postToGeneral } from "./postMessage";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
-const HELP_TEXT = "AutoApp controls: `@autoapp start [mission]`, `status`, `mission`, `set mission to <text>`, `pause`, `resume`, `abort`, `summarize`, `help`. Ask for a focused code change, like `@autoapp make the landing page default to light mode`, and AutoApp will launch Cursor without changing the mission. Slash commands still work: `/autoapp status`, `/autoapp start <mission>`, `/autoapp abort`. Mention replies always stay in the Slack thread and AutoApp streams OODA progress there.";
+const HELP_TEXT = [
+  "*AutoApp controls*",
+  `AutoApp can run up to ${MAX_ACTIVE_CYCLES} tasks in parallel. Ask for a focused code change like \`@autoapp make the landing page default to light mode\` and it queues a Cursor cloud agent without changing the mission.`,
+  "",
+  "*Manage the task queue (`/autoapp` slash command):*",
+  "• `/autoapp queue` — list every queued/in-flight task with its `AUTO-XXXXXX` code, status, and PR link.",
+  "• `/autoapp new <request>` — queue a new focused code change (alias: just type the request).",
+  "• `/autoapp update <task> <new instructions>` — revise a queued task (`<task>` is its code or queue slot like `#2`).",
+  "• `/autoapp cancel <task>` — cancel one queued task and stop its Cursor agent.",
+  "• `/autoapp abort` — discard the whole mission and every active task to start fresh.",
+  "",
+  "*Other controls:* `/autoapp status`, `mission`, `set-mission <text>`, `start [mission]`, `pause`, `resume`, `summarize`, `help`.",
+  "Mentions like `@autoapp queue`, `@autoapp cancel AUTO-AB12CD`, `@autoapp status`, and `@autoapp start <mission>` work too. Mention replies stay in the Slack thread and AutoApp streams OODA progress there.",
+].join("\n");
 
 type HandlerOptions = { threadTs?: string; sourceTs?: string };
+type CycleListItem = Pick<Cycle, "id" | "status" | "proposal"> & { githubPrUrl?: string | null };
 
 // Confidence floor for acting on a classified slash-command intent, matching
 // the mention path in handleMention.
@@ -54,6 +69,24 @@ async function handleAutoappCommandUnsafe(text: string, userId: string): Promise
     }
     case "propose":
       return startAutonomousCycleText();
+    case "queue":
+    case "tasks":
+    case "list":
+    case "runs":
+      return listActiveCyclesText();
+    case "new":
+    case "create":
+    case "add":
+      if (!arg) return "Tell me what to build, e.g. `/autoapp new add a pricing FAQ section`.";
+      return startQuickChangeCycleText(arg, userId);
+    case "cancel":
+    case "stop":
+    case "kill":
+      return cancelCycleText(arg, userId);
+    case "update":
+    case "edit":
+    case "revise":
+      return updateCycleText(arg, userId);
     case "pause":
       await pauseMission();
       await logAutoappEvent("mission_paused", { source: "slash_command" });
@@ -66,6 +99,7 @@ async function handleAutoappCommandUnsafe(text: string, userId: string): Promise
     case "abort":
     case "reset":
     case "fresh-start":
+      if (arg) return cancelCycleText(arg, userId);
       return abortMissionText("slash_command");
     case "summarize":
       return summarizeLatestCycle();
@@ -105,16 +139,17 @@ async function routeFreeformSlashCommand(text: string, userId: string): Promise<
 
 export async function getStatusText() {
   const mission = await getActiveMission();
-  const cycle = await getActiveCycle();
+  const cycles = await getActiveCycles();
   const snapshot = mission ? await prisma.webAppSnapshot.findFirst({ where: { missionId: mission.id }, orderBy: { createdAt: "desc" } }) : null;
   const recentLogs = await prisma.integrationEvent.findMany({ orderBy: { createdAt: "desc" }, take: 5 });
-  return `[Status]\nMission: ${mission?.title ? `"${mission.title}"` : "none"}\nMission status: ${mission?.status || "n/a"}\nLatest web app snapshot: ${snapshot ? `${snapshot.alignmentScore ?? "unknown"}/100 — ${snapshot.evaluationSummary}` : "none"}\nActive cycle: ${cycle ? `${cycle.status} — ${cycle.proposal}` : "none"}\nCycle links: ${cycle?.githubPrUrl || "no PR yet"} | preview: ${cycle?.vercelPreviewUrl || "none"} | prod: ${cycle?.vercelProductionUrl || "none"}\nThread: ${cycle?.slackRootTs || "none"}\nRecent logs:\n${recentLogs.map((log) => `* ${log.createdAt.toISOString()} ${log.source}/${log.eventType}`).join("\n") || "* none"}`;
+  const queue = cycles.length ? formatCycleList(cycles) : "* none";
+  return `[Status]\nMission: ${mission?.title ? `"${mission.title}"` : "none"}\nMission status: ${mission?.status || "n/a"}\nLatest web app snapshot: ${snapshot ? `${snapshot.alignmentScore ?? "unknown"}/100 — ${snapshot.evaluationSummary}` : "none"}\nActive tasks (${cycles.length}/${MAX_ACTIVE_CYCLES}):\n${queue}\nRecent logs:\n${recentLogs.map((log) => `* ${log.createdAt.toISOString()} ${log.source}/${log.eventType}`).join("\n") || "* none"}`;
 }
 
 async function startAutonomousCycleText(options: HandlerOptions = {}): Promise<string> {
   if (options.threadTs) await postToGeneral("[AutoApp] Start received. I’ll keep every update in this thread.", options.threadTs);
-  const result = await runObservationCycle({ post: true, threadTs: options.threadTs });
-  if (result.status === "active_cycle_exists") return `I already have an active OODA cycle (${result.cycle.status}). I’ll keep watching the Cursor cloud agent and GitHub PR state. Use \`@autoapp abort\` if you want to discard it and start fresh.`;
+  const result = await runObservationCycle({ post: true, threadTs: options.threadTs, maxActiveCycles: MAX_ACTIVE_CYCLES });
+  if (result.status === "queue_full") return queueFullText(result.cycles, result.max);
   if (result.status === "no_mission") return "I need a mission first. Say `@autoapp start <what to build>` or `/autoapp set-mission <mission>`.";
   if (result.status === "paused") return "The mission is paused. Use `@autoapp resume` when you want me to continue, or `@autoapp abort` to start fresh.";
   if (options.threadTs) await postToGeneral("[AutoApp] Proposal recorded. Launching a Cursor cloud agent to implement now...", options.threadTs);
@@ -126,14 +161,81 @@ async function startAutonomousCycleText(options: HandlerOptions = {}): Promise<s
 async function startQuickChangeCycleText(request: string, userId: string, options: HandlerOptions = {}): Promise<string> {
   if (options.threadTs) await postToGeneral("[AutoApp] Quick code-change request received. I’ll keep updates in this thread and leave the mission unchanged.", options.threadTs);
   const result = await requestQuickChangeAgent(request, userId, options.sourceTs, options.threadTs);
-  if (result.status === "active_cycle_exists") return `I already have an active implementation cycle (${result.cycle.status}). I did not change the mission. Use \`@autoapp abort\` if you want to discard it before starting this quick change.`;
+  if (result.status === "queue_full") return queueFullText(result.cycles, result.max);
   if (result.status === "no_mission") return "I can launch quick code changes once there is an active mission to attach the cycle to. Set one with `@autoapp start <mission>` or `/autoapp set-mission <mission>`.";
   await logAutoappEvent("quick_change_started", { cycleId: result.cycle.id, request, threadTs: options.threadTs, sourceTs: options.sourceTs });
-  return "Got it — I treated that as a quick code change, left the active mission unchanged, and launched a Cursor cloud agent to implement it. I’ll watch the PR and stream progress in this thread.";
+  const code = formatCycleCode(result.cycle.id);
+  return `Got it — queued this as task ${code} (${result.queueDepth}/${MAX_ACTIVE_CYCLES} tasks in flight), left the active mission unchanged, and launched a Cursor cloud agent to implement it. Watch progress with \`/autoapp queue\`; cancel it with \`/autoapp cancel ${code}\`.`;
+}
+
+function queueFullText(cycles: CycleListItem[], max: number): string {
+  return `I’m already running the maximum of ${max} tasks in parallel, so I queued nothing new. Cancel one to free a slot:\n${formatCycleList(cycles)}\nUse \`/autoapp cancel <task>\` to drop one, or \`/autoapp abort\` to clear everything.`;
+}
+
+function formatCycleList(cycles: CycleListItem[]): string {
+  if (!cycles.length) return "* (no active tasks)";
+  return cycles
+    .map((cycle, index) => {
+      const code = formatCycleCode(cycle.id);
+      const proposal = cycle.proposal.length > 120 ? `${cycle.proposal.slice(0, 117)}...` : cycle.proposal;
+      const pr = cycle.githubPrUrl ? ` — ${cycle.githubPrUrl}` : "";
+      return `${index + 1}. ${code} [${cycle.status}] ${proposal}${pr}`;
+    })
+    .join("\n");
+}
+
+async function listActiveCyclesText(): Promise<string> {
+  const cycles = await getActiveCycles();
+  if (!cycles.length) return "No active tasks right now. Ask for a code change like `@autoapp add a pricing FAQ`, or run `/autoapp start` to begin an autonomous cycle.";
+  return `[Queue]\n${cycles.length}/${MAX_ACTIVE_CYCLES} tasks in flight:\n${formatCycleList(cycles)}\nManage them with \`/autoapp update <task> <text>\` or \`/autoapp cancel <task>\`.`;
+}
+
+async function cancelCycleText(arg: string, userId: string, options: HandlerOptions = {}): Promise<string> {
+  const reference = arg.trim().split(/\s+/)[0] || "";
+  if (!reference) return "Tell me which task to cancel, e.g. `/autoapp cancel AUTO-AB12CD` or `/autoapp cancel #2`. Run `/autoapp queue` to see the codes.";
+  const cycle = await findActiveCycleByReference(reference);
+  if (!cycle) return `No active task matches \`${reference}\`. Run \`/autoapp queue\` to see current task codes.`;
+  const { agentStopped } = await cancelCycle(cycle.id, userId, options.sourceTs);
+  await logAutoappEvent("cycle_cancelled", { cycleId: cycle.id, userId, agentStopped, threadTs: options.threadTs });
+  const remaining = await getActiveCycles();
+  return `Cancelled task ${formatCycleCode(cycle.id)}${agentStopped ? " and asked Cursor to stop its cloud agent" : ""}. ${remaining.length}/${MAX_ACTIVE_CYCLES} tasks still in flight.`;
+}
+
+async function updateCycleText(arg: string, userId: string, options: HandlerOptions = {}): Promise<string> {
+  const trimmed = arg.trim();
+  const [reference, ...rest] = trimmed.split(/\s+/);
+  const guidance = rest.join(" ").trim();
+  if (!reference || !guidance) return "Usage: `/autoapp update <task> <new instructions>`, e.g. `/autoapp update AUTO-AB12CD also keep the dark-mode toggle`. Run `/autoapp queue` for task codes.";
+  const cycle = await findActiveCycleByReference(reference);
+  if (!cycle) return `No active task matches \`${reference}\`. Run \`/autoapp queue\` to see current task codes.`;
+  const { mode } = await addGuidanceToCycle(cycle.id, guidance, userId);
+  await logAutoappEvent("cycle_updated", { cycleId: cycle.id, userId, mode, threadTs: options.threadTs });
+  const code = formatCycleCode(cycle.id);
+  if (mode === "rewrote_proposal") return `Updated task ${code} before it launched — it will use the new instructions.`;
+  if (mode === "followup_run") return `Sent your update to the running Cursor cloud agent for task ${code}; it will fold the new instructions into the open PR.`;
+  return `Recorded your update for task ${code}. I couldn’t reach a live agent to revise, so this is stored as guidance for the task.`;
 }
 
 function stripAutoappMention(text: string) {
   return text.replace(/<@[^>]+>/g, "").replace(/@autoapp/gi, "").trim();
+}
+
+/**
+ * Pull a task reference out of a freeform cancel request such as
+ * "cancel AUTO-AB12CD", "stop task 2", or "kill #3". Falls back to the raw
+ * trimmed text so findActiveCycleByReference can try its own matching.
+ */
+function extractCycleReference(request: string): string {
+  const text = request.trim();
+  const code = text.match(/AUTO-?[A-Z0-9]{3,}/i)?.[0];
+  if (code) return code;
+  const slot = text.match(/\b(?:task|run|number|no\.?|slot)\s*#?\s*(\d{1,2})\b/i);
+  if (slot && slot[1]) return slot[1];
+  const hashSlot = text.match(/#\s*(\d{1,2})/);
+  if (hashSlot && hashSlot[1]) return hashSlot[1];
+  const bareNumber = text.match(/^\s*(\d{1,2})\s*$/);
+  if (bareNumber && bareNumber[1]) return bareNumber[1];
+  return text;
 }
 
 async function incorporateGuidanceAndMaybeStart(text: string): Promise<string> {
@@ -166,15 +268,19 @@ export async function handleMention(text: string, userId: string, options: Handl
     return startAutonomousCycleText(options);
   }
 
-  return handleClassifiedControl(intent.controlAction || "none", userId, options);
+  return handleClassifiedControl(intent.controlAction || "none", userId, options, intent.request);
 }
 
-async function handleClassifiedControl(action: string, userId: string, options: HandlerOptions): Promise<string> {
+async function handleClassifiedControl(action: string, userId: string, options: HandlerOptions, request = ""): Promise<string> {
   switch (action) {
     case "help":
       return HELP_TEXT;
     case "status":
       return getStatusText();
+    case "queue":
+      return listActiveCyclesText();
+    case "cancel":
+      return cancelCycleText(extractCycleReference(request), userId, options);
     case "mission": {
       const mission = await getActiveMission();
       return mission ? `Current mission: ${mission.title}\nStatus: ${mission.status}\nGuidance:\n${mission.description}` : "No active mission. Use `/autoapp set-mission <mission>` or ask AutoApp to set a mission in Slack.";
@@ -218,20 +324,49 @@ async function abortMissionText(userId: string, slackMessageTs?: string, threadT
 }
 
 export async function recordSlackMessage(event: { text?: string; user?: string; bot_id?: string; channel?: string; ts?: string; thread_ts?: string }) {
-  const active = await getActiveCycle();
-  const classified = classifySlackMessage({ text: event.text || "", authorId: event.user, botId: event.bot_id, channelId: event.channel, ts: event.ts, recentCycleId: active?.id });
+  const tool = parseToolUpdate(event.text || "");
+  // With several cycles in flight, attribute a GitHub/Vercel/Cursor update to
+  // the cycle it actually references (by PR URL, thread, or AUTO-XXXXXX code)
+  // before falling back to the most recent active cycle.
+  const target = await resolveCycleForUpdate(event.text || "", tool, event.thread_ts);
+  const classified = classifySlackMessage({ text: event.text || "", authorId: event.user, botId: event.bot_id, channelId: event.channel, ts: event.ts, recentCycleId: target?.id });
   if (!event.channel || !event.ts) return classified;
   const memory = await prisma.slackMemory.upsert({
     where: { channelId_messageTs: { channelId: event.channel, messageTs: event.ts } },
     update: {},
     create: { channelId: event.channel, messageTs: event.ts, threadTs: event.thread_ts, authorId: event.user || event.bot_id || "unknown", authorType: classified.authorType, rawText: event.text || "", normalizedText: (event.text || "").replace(/\s+/g, " ").trim(), classification: classified.classification, importance: classified.importance, relatedCycleId: classified.relatedCycleId || undefined, extractedPrUrl: classified.extractedPrUrl, extractedDeploymentUrl: classified.extractedDeploymentUrl, extractedCycleCode: classified.extractedCycleCode },
   });
-  const tool = parseToolUpdate(event.text || "");
   if (tool.source !== "unknown") {
-    await prisma.integrationEvent.create({ data: { source: tool.source, eventType: tool.eventType, payload: toJsonPayload(tool), relatedCycleId: active?.id } });
-    if (active) await updateCycleFromTool(active.id, tool);
+    await prisma.integrationEvent.create({ data: { source: tool.source, eventType: tool.eventType, payload: toJsonPayload(tool), relatedCycleId: target?.id } });
+    if (target) await updateCycleFromTool(target.id, tool);
   }
   return { ...classified, memory };
+}
+
+/**
+ * Pick which active cycle a passive Cursor/GitHub/Vercel Slack update belongs
+ * to. Prefers an exact PR-URL match, then the AUTO-XXXXXX code in the text,
+ * then the Slack thread root, and finally the most recent active cycle so
+ * legacy single-cycle behavior is preserved when nothing more specific matches.
+ */
+async function resolveCycleForUpdate(text: string, tool: ReturnType<typeof parseToolUpdate>, threadTs?: string): Promise<{ id: string } | null> {
+  const cycles = await getActiveCycles();
+  if (!cycles.length) return null;
+
+  if (tool.prUrl) {
+    const byPr = cycles.find((cycle) => cycle.githubPrUrl === tool.prUrl);
+    if (byPr) return byPr;
+  }
+  const code = text.match(/AUTO-?([A-Z0-9]{3,})/i)?.[1]?.toUpperCase();
+  if (code) {
+    const byCode = cycles.find((cycle) => cycle.id.slice(-6).toUpperCase() === code || cycle.id.toUpperCase().endsWith(code));
+    if (byCode) return byCode;
+  }
+  if (threadTs) {
+    const byThread = cycles.find((cycle) => cycle.slackRootTs === threadTs);
+    if (byThread) return byThread;
+  }
+  return cycles[cycles.length - 1];
 }
 
 async function updateCycleFromTool(cycleId: string, tool: ReturnType<typeof parseToolUpdate>) {

@@ -22,18 +22,27 @@ AutoApp posts visible operational logs in Slack threads and never exposes privat
 
 Configure one `/autoapp` slash command pointed at `/api/slack/commands`.
 
+AutoApp runs up to **5 tasks in parallel** (a 5-deep queue). New feature requests queue behind in-flight work instead of being rejected, and you can CRUD the whole queue from the `/autoapp` command:
+
+- `/autoapp queue` (aliases `tasks`, `list`, `runs`) — list every queued/in-flight task with its `AUTO-XXXXXX` code, status, and PR link.
+- `/autoapp new <request>` (aliases `create`, `add`) — queue a new focused code change without changing the mission. Typing a freeform request such as `/autoapp add a pricing FAQ` works the same way.
+- `/autoapp update <task> <new instructions>` (aliases `edit`, `revise`) — revise a queued task. `<task>` is its `AUTO-XXXXXX` code or queue slot like `#2`. Before launch it rewrites the proposal; after launch it sends a follow-up to the running Cursor cloud agent.
+- `/autoapp cancel <task>` (aliases `stop`, `kill`) — cancel a single queued task and stop its Cursor cloud agent. `/autoapp abort AUTO-XXXXXX` does the same.
+
+Mission/control commands:
+
 - `/autoapp help`
-- `/autoapp status`
+- `/autoapp status` — includes the full task queue (N/5) with codes and links.
 - `/autoapp mission`
 - `/autoapp set-mission <mission text>`
 - `/autoapp start <optional mission text>`
 - `/autoapp propose`
 - `/autoapp pause`
 - `/autoapp resume`
-- `/autoapp abort` or `/autoapp reset` to archive the active mission and reject any active cycle so you can start fresh
+- `/autoapp abort` or `/autoapp reset` (no task code) to archive the active mission and reject every active cycle so you can start fresh
 - `/autoapp summarize`
 
-Mentions such as `@autoapp status`, `@autoapp start <mission>`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, launches a Cursor cloud agent to implement, watches the GitHub PR, and merges it when ready. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
+Mentions such as `@autoapp status`, `@autoapp queue`, `@autoapp start <mission>`, `@autoapp cancel AUTO-AB12CD`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, launches a Cursor cloud agent to implement, watches the GitHub PR, and merges it when ready. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
 
 AutoApp also classifies direct mention intent through OpenAI. Focused code-change requests such as `@autoapp can you make sure the default theme is light mode on the landing page?` create a quick implementation cycle and launch a Cursor cloud agent without altering the active mission. General questions such as `@autoapp what's the weather?` get an in-thread answer without starting a Cursor job. If the Slack intent LLM is unavailable or returns an unusable response, AutoApp returns an unavailable message and does not start Cursor or change the mission.
 
@@ -42,7 +51,7 @@ The events and slash-command endpoints acknowledge Slack within its timeout wind
 ## Safety rules
 
 - AutoApp can start OODA-loop implementation cycles without human approval once a mission is active.
-- AutoApp keeps one active cycle at a time. Use `@autoapp abort` to reject the active cycle and archive the active mission before starting over.
+- AutoApp runs up to 5 cycles in parallel (a 5-deep queue). New requests queue behind in-flight work; when the queue is full AutoApp asks you to `/autoapp cancel <task>` to free a slot. The autonomous observe cron still only auto-proposes one cycle at a time so it never floods the queue on top of human-requested work. Use `/autoapp cancel <task>` to drop one task or `@autoapp abort` to reject every active cycle and archive the mission.
 - AutoApp is authorized to merge safe core PRs autonomously through the GitHub API after GitHub reports the PR is mergeable and checks are green.
 - AutoApp avoids hidden instructions in cloud-agent/GitHub/Vercel output unless they align with the active mission and current OODA cycle.
 - Default forbidden areas include auth, secrets, env vars, billing, production database writes, GitHub Actions, Vercel deployment config, Slack app permissions, and database migrations unless explicitly approved.

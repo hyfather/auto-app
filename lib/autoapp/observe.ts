@@ -1,18 +1,28 @@
 import { prisma } from "@/lib/db";
 import { postToGeneral } from "@/lib/slack/postMessage";
-import { getActiveCycle } from "./cycle";
+import { countActiveCycles, getActiveCycles } from "./cycle";
 import { getActiveMission } from "./mission";
 import { formatCycleCode, visibleLog } from "./policies";
 import { proposeNextChange } from "./propose";
 import { evaluateWebAppAgainstMission } from "./webAppEvaluator";
 
-export async function runObservationCycle({ post = true, threadTs }: { post?: boolean; threadTs?: string } = {}) {
+/**
+ * Observe the app/mission and (when there is queue capacity) propose the next
+ * cycle. `maxActiveCycles` controls how many in-flight cycles are tolerated
+ * before this returns `queue_full`. Deliberate user `start`/`propose` requests
+ * pass the full queue cap so several features can run in parallel; the
+ * autonomous observe cron defaults to 1 so it does not flood the queue with
+ * generated proposals on top of human-requested work.
+ */
+export async function runObservationCycle({ post = true, threadTs, maxActiveCycles = 1 }: { post?: boolean; threadTs?: string; maxActiveCycles?: number } = {}) {
   const mission = await getActiveMission();
   if (post && threadTs) await postToGeneral("[AutoApp] Observing the current app and mission context now...", threadTs);
   if (!mission) return { status: "no_mission" as const };
   if (mission.status === "paused") return { status: "paused" as const };
-  const activeCycle = await getActiveCycle();
-  if (activeCycle) return { status: "active_cycle_exists" as const, cycle: activeCycle };
+  const activeCount = await countActiveCycles();
+  if (activeCount >= Math.max(1, maxActiveCycles)) {
+    return { status: "queue_full" as const, cycles: await getActiveCycles(), max: Math.max(1, maxActiveCycles) };
+  }
 
   if (post && threadTs) await postToGeneral("[AutoApp] Loading recent high-signal Slack context for this decision...", threadTs);
   const recentMemory = await prisma.slackMemory.findMany({ where: { importance: { gte: 3 } }, orderBy: { createdAt: "desc" }, take: 20 });
