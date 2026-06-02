@@ -12,5 +12,5 @@ function copyForMission(mission?: string | null) {
 }
 export function Hero({ missionTitle }: HeroProps) {
   const copy = copyForMission(missionTitle);
-  return <section className="hero"><div><p className="eyebrow">For founders, product teams, and service businesses</p><h1>{copy.headline}</h1><p className="lead">{copy.lead}</p><CTA primary={copy.primary} secondary={copy.secondary} /></div><aside className="card"><h2>Current mission</h2><p>{missionTitle || "Give AutoApp a mission in Slack #general."}</p><p className="built">One Slack channel. One mission. One deployed app. Continuous, PR-sized improvements.</p></aside></section>;
+  return <section className="hero"><div> <p className="eyebrow">For founders, product teams, and service businesses</p><h1>{copy.headline}</h1><p className="lead">{copy.lead}</p><CTA primary={copy.primary} secondary={copy.secondary} /></div><aside className="card"><h2>Current mission</h2><p>{missionTitle || "Give AutoApp a mission in Slack #general."}</p><p className="built">One Slack channel. One mission. One deployed app. Continuous, PR-sized improvements.</p></aside></section>;
 }
