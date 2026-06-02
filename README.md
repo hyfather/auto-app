@@ -9,7 +9,7 @@ AutoApp intentionally does **not** include an `/admin` UI. Slack is the control 
 
 ## Integration model
 
-- **Cursor Cloud Agents are the implementation worker.** When a cycle is approved, AutoApp launches a [Cursor cloud agent](https://cursor.com/docs/cloud-agent/api/endpoints) through the Cursor API (`POST https://api.cursor.com/v1/agents`) against the connected GitHub repository. The agent implements the change and opens a pull request.
+- **Cursor Cloud Agents are the implementation worker.** When a cycle is approved, AutoApp launches a [Cursor cloud agent](https://cursor.com/docs/cloud-agent/api/endpoints) through the Cursor API (`POST https://api.cursor.com/v1/agents`) against the connected GitHub repository with `autoCreatePR` enabled. The agent implements the change and opens a pull request.
 - **GitHub is the code/change-management facet.** AutoApp polls the GitHub REST API for the PR link, PR state, checks, and mergeability. Once the PR is open, mergeable, and checks are green, AutoApp merges it directly through the GitHub API instead of asking Cursor to merge.
 - **Vercel is the deployment/runtime facet.** Deployment status is read from Vercel Slack notifications in `#general`; Vercel is treated as a passive notification source, not an interactive Slack bot. AutoApp does not call the Vercel API.
 - **Slack is the intelligence/control plane.** All important activity flows through `SLACK_GENERAL_CHANNEL_ID`; Slack app messages remain useful context, but GitHub API polling is the closed loop for PR state.
@@ -87,7 +87,7 @@ See `.env.example` for required and optional variables:
 - `GITHUB_MERGE_REQUIRE_CHECKS` (optional): set to `false` only if AutoApp should merge when GitHub reports no checks; defaults to requiring checks.
 - `GITHUB_CURSOR_AUTHOR_LOGIN` (optional): GitHub login that opens Cursor PRs, used to narrow fallback PR discovery.
 - `GITHUB_API_BASE_URL` (optional): override for GitHub Enterprise; defaults to `https://api.github.com`.
-- Optional bot IDs: `AUTOAPP_BOT_USER_ID`, `VERCEL_BOT_USER_ID`, `GITHUB_BOT_USER_ID`
+- Optional bot IDs: `AUTOAPP_BOT_USER_ID`, `CURSOR_BOT_USER_ID`, `VERCEL_BOT_USER_ID`, `GITHUB_BOT_USER_ID`
 - Future-only: `VERCEL_TOKEN`
 
 ## Public app

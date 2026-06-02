@@ -124,7 +124,6 @@ async function cursorFetch<T>(
 export type CreateAgentOptions = {
   prompt: string;
   name?: string;
-  autoCreatePR?: boolean;
 };
 
 export async function createCloudAgent(options: CreateAgentOptions): Promise<CreateAgentResult> {
@@ -133,7 +132,7 @@ export async function createCloudAgent(options: CreateAgentOptions): Promise<Cre
   const body: Record<string, unknown> = {
     prompt: { text: options.prompt },
     repos: [{ url: repoUrl, startingRef: getStartingRef() }],
-    autoCreatePR: options.autoCreatePR ?? true,
+    autoCreatePR: true,
   };
   if (options.name) body.name = options.name.slice(0, 100);
   if (model) body.model = { id: model };
