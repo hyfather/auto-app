@@ -1,22 +1,25 @@
 import { getOpenAIClient } from "@/lib/ai/openai";
 
-export type SlackMentionIntent =
-  | { kind: "code_change"; confidence: number; request: string }
-  | { kind: "question"; confidence: number; request: string }
-  | { kind: "mission_update"; confidence: number; request: string }
-  | { kind: "control"; confidence: number; request: string }
-  | { kind: "unknown"; confidence: number; request: string };
+export type SlackControlAction = "help" | "status" | "mission" | "start" | "pause" | "resume" | "abort" | "summarize" | "approve" | "reject" | "none";
 
-const APP_TARGET_WORDS = /\b(app|site|website|page|landing|homepage|hero|cta|button|theme|mode|copy|text|style|color|layout|component|default|form|section|ui|ux)\b/i;
-const CODE_CHANGE_WORDS = /\b(make|change|update|add|remove|fix|implement|ensure|default|switch|set|show|hide|rename|improve)\b/i;
-const GENERAL_QUESTION_WORDS = /\b(weather|temperature|forecast|time|date|news|sports|stock|recipe|joke|capital of|who is|what is|what's|explain|define)\b/i;
-const CONTROL_WORDS = /\b(status|help|controls|commands|abort|reset|pause|resume|summarize|summary|approve|approved|reject|start|begin|kick off|launch|run|propose)\b/i;
-const MISSION_WORDS = /\b(set[- ]?mission|mission is|set the mission|mission:)\b/i;
+export type SlackMentionIntent = {
+  kind: "code_change" | "question" | "mission_update" | "control" | "unknown";
+  confidence: number;
+  request: string;
+  controlAction?: SlackControlAction;
+};
+
+export class SlackIntentUnavailableError extends Error {
+  constructor(message = "AutoApp is unavailable because the Slack intent LLM is not configured or did not return a usable response.") {
+    super(message);
+    this.name = "SlackIntentUnavailableError";
+  }
+}
 
 export async function classifySlackMentionIntent(text: string): Promise<SlackMentionIntent> {
   const request = normalizeMentionText(text);
   const client = getOpenAIClient();
-  if (!client) return deterministicSlackMentionIntent(request);
+  if (!client) throw new SlackIntentUnavailableError("AutoApp is unavailable because OPENAI_API_KEY is not configured for Slack intent routing.");
 
   try {
     const response = await client.chat.completions.create({
@@ -26,40 +29,41 @@ export async function classifySlackMentionIntent(text: string): Promise<SlackMen
           role: "system",
           content: [
             "Classify a Slack message sent to AutoApp.",
-            "Return only JSON with: kind, confidence, request.",
+            "Return only JSON with keys: kind, confidence, request, controlAction.",
             "kind must be one of: code_change, question, mission_update, control, unknown.",
-            "Use code_change only when the user asks AutoApp to implement or modify app/code/UI/config behavior.",
+            "controlAction must be one of: help, status, mission, start, pause, resume, abort, summarize, approve, reject, none.",
+            "Use code_change when the user asks AutoApp to implement or modify app/code/UI/config behavior.",
             "Use question for general knowledge or conversational questions that should be answered in Slack without starting a Cursor agent.",
-            "Use mission_update when the user wants to set or alter AutoApp's mission.",
-            "Use control for status/help/start/abort/approve/reject/pause/resume/summarize commands.",
+            "Use mission_update only when the user wants to set or replace AutoApp's active mission; put the mission text in request.",
+            "Use control for AutoApp control-plane commands and set controlAction accordingly.",
+            "For code_change and question, keep request as the cleaned user request.",
           ].join(" "),
         },
         { role: "user", content: request },
       ],
       temperature: 0,
-      max_tokens: 120,
+      max_tokens: 160,
       response_format: { type: "json_object" },
     });
-    const parsed = JSON.parse(response.choices[0]?.message?.content || "{}") as Partial<SlackMentionIntent>;
-    if (isValidIntentKind(parsed.kind)) {
-      return {
-        kind: parsed.kind,
-        confidence: clampConfidence(parsed.confidence),
-        request: typeof parsed.request === "string" && parsed.request.trim() ? parsed.request.trim() : request,
-      } as SlackMentionIntent;
-    }
-  } catch {
-    // Fall back to deterministic routing so Slack remains responsive without LLM access.
-  }
+    const parsed = JSON.parse(response.choices[0]?.message?.content || "{}");
+    if (!isValidIntentKind(parsed.kind)) throw new SlackIntentUnavailableError("Slack intent LLM returned an invalid kind.");
 
-  return deterministicSlackMentionIntent(request);
+    return {
+      kind: parsed.kind,
+      confidence: clampConfidence(parsed.confidence),
+      request: typeof parsed.request === "string" && parsed.request.trim() ? parsed.request.trim() : request,
+      controlAction: isValidControlAction(parsed.controlAction) ? parsed.controlAction : "none",
+    };
+  } catch (error) {
+    if (error instanceof SlackIntentUnavailableError) throw error;
+    throw new SlackIntentUnavailableError();
+  }
 }
 
 export async function answerGeneralQuestion(question: string): Promise<string> {
   const cleaned = normalizeMentionText(question);
   const client = getOpenAIClient();
-  const fallback = "I can answer AutoApp control questions here, but I do not have live external data in this Slack handler. I did not start a Cursor agent.";
-  if (!client) return fallback;
+  if (!client) throw new SlackIntentUnavailableError("AutoApp is unavailable because OPENAI_API_KEY is not configured for Slack question answering.");
 
   try {
     const response = await client.chat.completions.create({
@@ -74,24 +78,13 @@ export async function answerGeneralQuestion(question: string): Promise<string> {
       temperature: 0.2,
       max_tokens: 180,
     });
-    return `${response.choices[0]?.message?.content?.trim() || fallback}\n\nNo Cursor agent was started.`;
-  } catch {
-    return fallback;
+    const answer = response.choices[0]?.message?.content?.trim();
+    if (!answer) throw new SlackIntentUnavailableError("Slack answer LLM returned an empty response.");
+    return `${answer}\n\nNo Cursor agent was started.`;
+  } catch (error) {
+    if (error instanceof SlackIntentUnavailableError) throw error;
+    throw new SlackIntentUnavailableError("AutoApp is unavailable because Slack question answering failed.");
   }
-}
-
-export function deterministicSlackMentionIntent(text: string): SlackMentionIntent {
-  const request = normalizeMentionText(text);
-  const lower = request.toLowerCase();
-
-  if (!request) return { kind: "unknown", confidence: 0.2, request };
-  if (MISSION_WORDS.test(lower)) return { kind: "mission_update", confidence: 0.9, request };
-  if (CODE_CHANGE_WORDS.test(lower) && APP_TARGET_WORDS.test(lower) && !GENERAL_QUESTION_WORDS.test(lower)) {
-    return { kind: "code_change", confidence: 0.78, request };
-  }
-  if (CONTROL_WORDS.test(lower) && request.split(/\s+/).length <= 8) return { kind: "control", confidence: 0.85, request };
-  if (/[?]$/.test(request) || GENERAL_QUESTION_WORDS.test(lower)) return { kind: "question", confidence: 0.75, request };
-  return { kind: "unknown", confidence: 0.45, request };
 }
 
 function normalizeMentionText(text: string): string {
@@ -100,6 +93,10 @@ function normalizeMentionText(text: string): string {
 
 function isValidIntentKind(kind: unknown): kind is SlackMentionIntent["kind"] {
   return kind === "code_change" || kind === "question" || kind === "mission_update" || kind === "control" || kind === "unknown";
+}
+
+function isValidControlAction(action: unknown): action is SlackControlAction {
+  return action === "help" || action === "status" || action === "mission" || action === "start" || action === "pause" || action === "resume" || action === "abort" || action === "summarize" || action === "approve" || action === "reject" || action === "none";
 }
 
 function clampConfidence(value: unknown): number {
