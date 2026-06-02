@@ -248,6 +248,25 @@ export async function requestAutonomousMergeIfReady(cycleId: string): Promise<bo
   return reconcileCyclePullRequest(cycleId);
 }
 
+/**
+ * Best-effort, non-blocking advance of every in-flight cycle: poll Cursor runs
+ * for newly opened PRs, then reconcile/merge open PRs through GitHub. This is
+ * the same work the `/api/cron/observe` scheduler does, exposed so any Slack
+ * interaction can also nudge the OODA loop forward. That keeps a launched agent
+ * from getting stuck in `waiting_for_agent` (with its PR never discovered or
+ * merged) when the scheduled cron is delayed or not configured. Never throws.
+ */
+export async function nudgeActiveCycles(): Promise<{ polledAgents: number; polledPullRequests: number }> {
+  try {
+    const polledAgents = await pollActiveAgents();
+    const polledPullRequests = await pollActivePullRequests();
+    return { polledAgents, polledPullRequests };
+  } catch (error) {
+    console.error("[AutoApp] Failed to advance active cycles:", error instanceof Error ? error.message : error);
+    return { polledAgents: 0, polledPullRequests: 0 };
+  }
+}
+
 export async function reconcileCyclePullRequest(cycleId: string, options: { prUrl?: string; headBranch?: string } = {}): Promise<boolean> {
   const cycle = await prisma.cycle.findUnique({ where: { id: cycleId }, include: { decisions: true } });
   if (!cycle || cycle.status === "completed" || cycle.status === "failed" || cycle.status === "rejected") return false;
