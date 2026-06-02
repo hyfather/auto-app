@@ -14,6 +14,7 @@ export type GitHubPullRequest = {
   body: string | null;
   draft: boolean;
   merged?: boolean;
+  merged_at?: string | null;
   mergeable: boolean | null;
   mergeable_state?: string;
   updated_at: string;
@@ -49,6 +50,28 @@ export type PullRequestChecks = {
   total: number;
   failing: string[];
   pending: string[];
+};
+
+export type GitHubDeployment = {
+  id: number;
+  sha: string;
+  ref: string;
+  task: string;
+  environment: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+  creator?: { login?: string } | null;
+};
+
+export type GitHubDeploymentStatus = {
+  state: "error" | "failure" | "inactive" | "in_progress" | "queued" | "pending" | "success" | string;
+  description?: string | null;
+  environment?: string;
+  target_url?: string | null;
+  environment_url?: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export class GitHubApiError extends Error {
@@ -208,6 +231,20 @@ export async function getPullRequestChecks(sha: string): Promise<PullRequestChec
   if (pending.length || combinedStatus.state === "pending") return { state: "pending", total, failing, pending };
   if (total === 0) return { state: "none", total, failing, pending };
   return { state: "success", total, failing, pending };
+}
+
+export async function listDeployments(options: { environment?: string; ref?: string; perPage?: number } = {}): Promise<GitHubDeployment[]> {
+  const { token, repository } = requireConfig();
+  const params = new URLSearchParams({ per_page: String(options.perPage || 10) });
+  if (options.environment) params.set("environment", options.environment);
+  if (options.ref) params.set("ref", options.ref);
+  return githubFetch<GitHubDeployment[]>(token, `${repoPath(repository)}/deployments?${params.toString()}`);
+}
+
+export async function getLatestDeploymentStatus(deploymentId: number): Promise<GitHubDeploymentStatus | undefined> {
+  const { token, repository } = requireConfig();
+  const statuses = await githubFetch<GitHubDeploymentStatus[]>(token, `${repoPath(repository)}/deployments/${deploymentId}/statuses?per_page=1`);
+  return statuses[0];
 }
 
 export async function mergePullRequest(pr: GitHubPullRequest): Promise<{ sha: string; merged: boolean; message: string }> {

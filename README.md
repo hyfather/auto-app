@@ -29,10 +29,18 @@ AutoApp runs up to **5 tasks in parallel** (a 5-deep queue). New feature request
 - `/autoapp update <task> <new instructions>` (aliases `edit`, `revise`) — revise a queued task. `<task>` is its `AUTO-XXXXXX` code or queue slot like `#2`. Before launch it rewrites the proposal; after launch it sends a follow-up to the running Cursor cloud agent.
 - `/autoapp cancel <task>` (aliases `stop`, `kill`) — cancel a single queued task and stop its Cursor cloud agent. `/autoapp abort AUTO-XXXXXX` does the same.
 
+GitHub status commands (read live data through the GitHub REST API):
+
+- `/autoapp prs [open|closed|all]` (aliases `pulls`, `pr`) — list pull requests with their current state (open/draft/merged/closed) and combined CI check result, newest first.
+- `/autoapp deployments` (aliases `deploys`, `deployment`) — show the latest GitHub deployment (Vercel publishes these through its GitHub integration), its state, and how long ago it happened.
+- `/autoapp github` (alias `gh`) — combined snapshot of open PRs plus the last deployment.
+
+These reads are best-effort and time-bounded so they stay within Slack's slash-command budget; if `GITHUB_TOKEN`/`GITHUB_REPOSITORY` are not set they explain what to configure.
+
 Mission/control commands:
 
 - `/autoapp help`
-- `/autoapp status` — includes the full task queue (N/5) with codes and links.
+- `/autoapp status` — includes the full task queue (N/5) with codes and links, plus every open PR with its state/checks and the last deployment time.
 - `/autoapp mission`
 - `/autoapp set-mission <mission text>`
 - `/autoapp start <optional mission text>`
@@ -42,7 +50,7 @@ Mission/control commands:
 - `/autoapp abort` or `/autoapp reset` (no task code) to archive the active mission and reject every active cycle so you can start fresh
 - `/autoapp summarize`
 
-Mentions such as `@autoapp status`, `@autoapp queue`, `@autoapp start <mission>`, `@autoapp cancel AUTO-AB12CD`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, launches a Cursor cloud agent to implement, watches the GitHub PR, and merges it when ready. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
+Mentions such as `@autoapp status`, `@autoapp queue`, `@autoapp prs`, `@autoapp deployments`, `@autoapp start <mission>`, `@autoapp cancel AUTO-AB12CD`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, launches a Cursor cloud agent to implement, watches the GitHub PR, and merges it when ready. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
 
 AutoApp also classifies direct mention intent through OpenAI. Focused code-change requests such as `@autoapp can you make sure the default theme is light mode on the landing page?` create a quick implementation cycle and launch a Cursor cloud agent without altering the active mission. General questions such as `@autoapp what's the weather?` get an in-thread answer without starting a Cursor job. If the Slack intent LLM is unavailable or returns an unusable response, AutoApp returns an unavailable message and does not start Cursor or change the mission.
 
