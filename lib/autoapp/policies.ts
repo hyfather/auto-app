@@ -14,7 +14,7 @@ export const DEFAULT_CONSTRAINTS = [
   "Keep the diff small and PR-sized",
   "Prefer UI/copy changes before risky infrastructure changes",
   "Do not add an /admin UI",
-  "Do not autonomously merge PRs",
+  "Autonomously merge safe core PRs after Codex, GitHub, and Vercel signals satisfy acceptance criteria",
   "Open a PR against main",
   "Include a short PR summary",
 ];

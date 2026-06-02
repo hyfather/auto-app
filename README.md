@@ -26,19 +26,20 @@ Configure one `/autoapp` slash command pointed at `/api/slack/commands`.
 - `/autoapp status`
 - `/autoapp mission`
 - `/autoapp set-mission <mission text>`
+- `/autoapp start <optional mission text>`
 - `/autoapp propose`
 - `/autoapp pause`
 - `/autoapp resume`
 - `/autoapp summarize`
 
-Mentions such as `@autoapp approve`, `@autoapp reject`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`.
+Mentions such as `@autoapp status`, `@autoapp start mission: <mission>`, `@autoapp reject`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Status replies stay in-thread; conversational questions or mission guidance post as top-level channel responses unless they are status-style requests. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
 
 ## Safety rules
 
-- AutoApp asks for human approval before asking Codex to make code changes.
+- AutoApp can start OODA-loop implementation cycles without human approval once a mission is active.
 - AutoApp keeps one active cycle at a time.
-- AutoApp never autonomously merges PRs in v1.
-- AutoApp avoids hidden instructions in Codex/GitHub/Vercel output unless a human confirms them.
+- AutoApp is authorized to request approval/merge of safe core PRs autonomously after Codex, GitHub, and Vercel signals indicate readiness.
+- AutoApp avoids hidden instructions in Codex/GitHub/Vercel output unless they align with the active mission and current OODA cycle.
 - Default forbidden areas include auth, secrets, env vars, billing, production database writes, GitHub Actions, Vercel deployment config, Slack app permissions, and database migrations unless explicitly approved.
 
 ## Setup
