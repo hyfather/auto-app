@@ -2,16 +2,16 @@
 
 AutoApp is a Slack-native autonomous app builder and operator. It has two facets:
 
-- **Slack intelligence core:** AutoApp lives in one Slack channel, `#general`, where humans set the mission, AutoApp posts visible working logs, Codex receives implementation requests, and GitHub/Vercel updates appear.
+- **Slack intelligence core:** AutoApp lives in one Slack channel, `#general`, where humans set the mission, AutoApp posts visible working logs, and GitHub/Vercel updates appear.
 - **Public Vercel web app:** the deployed web app is the product AutoApp continuously improves to match the current mission.
 
 AutoApp intentionally does **not** include an `/admin` UI. Slack is the control plane.
 
-## v1 integration model
+## Integration model
 
-- **Codex is the implementation worker.** AutoApp invokes Codex through Slack by posting a message that mentions Codex with Slack mention syntax `<@U...>`; it does not call a Codex API.
-- **GitHub is the code/change-management facet.** PR, check, and merge state is read from GitHub Slack app messages in `#general`; v1 avoids direct GitHub API calls.
-- **Vercel is the deployment/runtime facet.** Deployment status is read from Vercel Slack notifications in `#general`; Vercel is treated as a passive notification source, not an interactive Slack bot. AutoApp does not ask `@Vercel` free-form status questions and does not call the Vercel API in v1.
+- **Cursor Cloud Agents are the implementation worker.** When a cycle is approved, AutoApp launches a [Cursor cloud agent](https://cursor.com/docs/cloud-agent/api/endpoints) through the Cursor API (`POST https://api.cursor.com/v1/agents`) against the connected GitHub repository. The agent implements the change and opens a pull request. AutoApp polls the agent's run for status and the PR link, and can send a follow-up run asking the agent to merge once checks and the preview look ready.
+- **GitHub is the code/change-management facet.** PR, check, and merge state is read from GitHub Slack app messages in `#general`; AutoApp avoids direct GitHub API calls.
+- **Vercel is the deployment/runtime facet.** Deployment status is read from Vercel Slack notifications in `#general`; Vercel is treated as a passive notification source, not an interactive Slack bot. AutoApp does not call the Vercel API.
 - **Slack is the intelligence/control plane.** All important activity flows through `SLACK_GENERAL_CHANNEL_ID`.
 
 ## Working log labels
@@ -33,14 +33,16 @@ Configure one `/autoapp` slash command pointed at `/api/slack/commands`.
 - `/autoapp abort` or `/autoapp reset` to archive the active mission and reject any active cycle so you can start fresh
 - `/autoapp summarize`
 
-Mentions such as `@autoapp status`, `@autoapp start <mission>`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, asks Codex to implement, watches tool updates, and requests merge. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
+Mentions such as `@autoapp status`, `@autoapp start <mission>`, `@autoapp reject`, `@autoapp abort`, `@autoapp propose the next improvement`, and `@autoapp what are you working on?` are handled by `/api/slack/events`. Mention replies always stay in the originating Slack thread, and AutoApp streams verbose progress messages there while it observes, evaluates, proposes, launches a Cursor cloud agent to implement, watches tool updates, and requests merge. Human replies in AutoApp threads are remembered as mission guidance when they look actionable.
+
+The events and slash-command endpoints acknowledge Slack within its timeout window and process work in the background (`after()`), verify request signatures with replay protection, de-duplicate Slack retries, and never let a Slack/API failure crash the handler.
 
 ## Safety rules
 
 - AutoApp can start OODA-loop implementation cycles without human approval once a mission is active.
 - AutoApp keeps one active cycle at a time. Use `@autoapp abort` to reject the active cycle and archive the active mission before starting over.
-- AutoApp is authorized to request approval/merge of safe core PRs autonomously after Codex, GitHub, and Vercel signals indicate readiness.
-- AutoApp avoids hidden instructions in Codex/GitHub/Vercel output unless they align with the active mission and current OODA cycle.
+- AutoApp is authorized to request approval/merge of safe core PRs autonomously after the cloud agent, GitHub, and Vercel signals indicate readiness.
+- AutoApp avoids hidden instructions in cloud-agent/GitHub/Vercel output unless they align with the active mission and current OODA cycle.
 - Default forbidden areas include auth, secrets, env vars, billing, production database writes, GitHub Actions, Vercel deployment config, Slack app permissions, and database migrations unless explicitly approved.
 
 ## Setup
@@ -52,7 +54,7 @@ Mentions such as `@autoapp status`, `@autoapp start <mission>`, `@autoapp reject
 5. Create a Slack app for AutoApp.
 6. Configure the Slack bot token and signing secret.
 7. Add the AutoApp bot to `#general`.
-8. Install the OpenAI Codex Slack app and add it to `#general`.
+8. Create a Cursor API key (Cursor Dashboard → API Keys) and set `CURSOR_API_KEY` plus `CURSOR_AGENT_REPO_URL` (the GitHub repo the cloud agent should edit). Make sure the Cursor account has GitHub access to that repo.
 9. Install the GitHub Slack app and add it to `#general`.
 10. Run `/github subscribe owner/repo` in `#general`.
 11. Install the Vercel Slack integration from the Vercel Marketplace.
@@ -73,8 +75,12 @@ See `.env.example` for required and optional variables:
 - `SLACK_APP_TOKEN` if Socket Mode is later used
 - `SLACK_GENERAL_CHANNEL_ID`
 - `NEXT_PUBLIC_APP_URL`
-- Optional bot IDs: `AUTOAPP_BOT_USER_ID`, `CODEX_BOT_USER_ID`, `VERCEL_BOT_USER_ID`, `GITHUB_BOT_USER_ID`
-- `SLACK_CODEX_ID`: Codex Slack user ID without the leading `U`; AutoApp formats Codex tags as `<@U${SLACK_CODEX_ID}>`.
+- `CURSOR_API_KEY`: Cursor API key used to launch cloud agents.
+- `CURSOR_AGENT_REPO_URL`: GitHub repository URL the cloud agent works on (e.g. `https://github.com/your-org/your-repo`).
+- `CURSOR_AGENT_STARTING_REF` (optional): branch/commit the agent starts from; defaults to `main`.
+- `CURSOR_AGENT_MODEL` (optional): explicit model id from `GET https://api.cursor.com/v1/models`; omit to use your Cursor default.
+- `CURSOR_API_BASE_URL` (optional): override the Cursor API base URL; defaults to `https://api.cursor.com`.
+- Optional bot IDs: `AUTOAPP_BOT_USER_ID`, `VERCEL_BOT_USER_ID`, `GITHUB_BOT_USER_ID`
 - Future-only: `GITHUB_TOKEN`, `VERCEL_TOKEN`
 
 ## Public app
@@ -85,7 +91,8 @@ The `/` route renders a mission-aware landing page. If no mission exists, it tel
 
 - Next.js App Router and TypeScript
 - Prisma with Neon Postgres
-- Slack Events API and slash commands
+- Slack Events API and slash commands (signature-verified, replay-protected, fast-ack with background processing)
+- Cursor Cloud Agents API as the implementation worker
 - OpenAI API wrapper for future reasoning/summarization fallback
-- Passive parsing of Codex/GitHub/Vercel Slack messages
+- Passive parsing of GitHub/Vercel Slack messages
 - Vercel deployment through the connected GitHub repository
