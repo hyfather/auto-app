@@ -15,16 +15,21 @@ const HELP_TEXT = "AutoApp controls: `@autoapp start [mission]`, `status`, `miss
 
 type HandlerOptions = { threadTs?: string; sourceTs?: string };
 
-export async function handleAutoappCommand(text: string): Promise<string> {
+// Confidence floor for acting on a classified slash-command intent, matching
+// the mention path in handleMention.
+const FREEFORM_INTENT_CONFIDENCE_THRESHOLD = 0.55;
+const SLASH_COMMAND_ACTOR = "slack-user";
+
+export async function handleAutoappCommand(text: string, userId: string = SLASH_COMMAND_ACTOR): Promise<string> {
   try {
-    return await handleAutoappCommandUnsafe(text);
+    return await handleAutoappCommandUnsafe(text, userId);
   } catch (error) {
     if (isMissingDatabaseSchemaError(error)) return `[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`;
     throw error;
   }
 }
 
-async function handleAutoappCommandUnsafe(text: string): Promise<string> {
+async function handleAutoappCommandUnsafe(text: string, userId: string): Promise<string> {
   const trimmed = text.trim();
   const [command, ...rest] = trimmed.split(/\s+/);
   const arg = rest.join(" ").trim();
@@ -65,8 +70,37 @@ async function handleAutoappCommandUnsafe(text: string): Promise<string> {
     case "summarize":
       return summarizeLatestCycle();
     default:
-      return incorporateGuidanceAndMaybeStart(trimmed);
+      return routeFreeformSlashCommand(trimmed, userId);
   }
+}
+
+/**
+ * Route freeform slash-command text (anything that is not a known subcommand)
+ * through the same intent classifier the mention path uses. Without this, a
+ * focused code-change request such as `/autoapp change theme to light
+ * background` was silently folded into mission guidance and never launched a
+ * Cursor cloud agent. Code-change requests now dispatch an agent; everything
+ * else preserves the historical mission-guidance behavior.
+ */
+async function routeFreeformSlashCommand(text: string, userId: string): Promise<string> {
+  const cleaned = stripAutoappMention(text);
+  if (!cleaned) return HELP_TEXT;
+
+  let intent;
+  try {
+    intent = await classifySlackMentionIntent(cleaned);
+  } catch (error) {
+    // If intent routing is unavailable (e.g. no OpenAI key), keep working by
+    // folding the text into the active mission's guidance like before.
+    if (error instanceof SlackIntentUnavailableError) return incorporateGuidanceAndMaybeStart(text);
+    throw error;
+  }
+
+  if (intent.kind === "code_change" && intent.confidence >= FREEFORM_INTENT_CONFIDENCE_THRESHOLD) {
+    return startQuickChangeCycleText(intent.request, userId);
+  }
+
+  return incorporateGuidanceAndMaybeStart(text);
 }
 
 export async function getStatusText() {
