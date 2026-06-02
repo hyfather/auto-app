@@ -29,7 +29,7 @@ export async function runObservationCycle({ post = true } = {}) {
     },
   });
   const code = formatCycleCode(cycle.id);
-  const message = `${visibleLog(code, "Observation", proposal.observation)}\n\n${visibleLog(code, "Proposal", `${proposal.proposedChange}\nRisk: ${proposal.riskLevel}.\nScope: small public web app change.\nAcceptance criteria:\n${proposal.acceptanceCriteria.map((item) => `* ${item}`).join("\n")}\n\nProceed?`)}`;
+  const message = `${visibleLog(code, "Observation", proposal.observation)}\n\n${visibleLog(code, "Proposal", `${proposal.proposedChange}\nRisk: ${proposal.riskLevel}.\nScope: small public web app change.\nAcceptance criteria:\n${proposal.acceptanceCriteria.map((item) => `* ${item}`).join("\n")}\n\nDecision: AutoApp will proceed autonomously under the active mission unless paused or rejected.`)}`;
   if (post) {
     const result = await postToGeneral(message);
     await prisma.cycle.update({ where: { id: cycle.id }, data: { slackRootTs: result.ts as string | undefined } });

@@ -12,8 +12,28 @@ export async function setActiveMission(text: string) {
     data: {
       title: missionText,
       description: missionText,
-      successCriteria: "The public Vercel app increasingly aligns with this mission through small reviewed PRs.",
+      successCriteria: "AutoApp should repeatedly run an OODA loop from Slack, improve the public Vercel app through small Codex PRs, and autonomously merge safe core changes that satisfy acceptance criteria.",
       status: "active",
+    },
+  });
+}
+
+export async function incorporateMissionInput(text: string) {
+  const input = text.replace(/<@[^>]+>/g, "").replace(/@autoapp/gi, "").trim();
+  if (!input) throw new Error("Mission input is required.");
+
+  const active = await getActiveMission();
+  if (!active) return setActiveMission(input);
+
+  const timestamp = new Date().toISOString();
+  const addition = `[${timestamp}] Slack guidance: ${input}`;
+  const description = active.description.includes(addition) ? active.description : `${active.description}\n\n${addition}`;
+
+  return prisma.mission.update({
+    where: { id: active.id },
+    data: {
+      description,
+      successCriteria: "AutoApp should satisfy the active mission plus every Slack guidance note in the mission description, keep the interaction conversational, and keep improving through autonomous OODA cycles.",
     },
   });
 }

@@ -37,7 +37,8 @@ export function classifySlackMessage(input: ClassificationInput): Classification
 
   if (mentionsAutoApp(text) && /approve|approved|\byes\b|proceed|go ahead/i.test(lower)) return { classification: "human_approval", authorType: "human", importance: 5, relatedCycleId: input.recentCycleId, extractedCycleCode: cycleCode, approvalIntent: "approved" };
   if (mentionsAutoApp(text) && /reject|\bno\b|stop|cancel|do not/i.test(lower)) return { classification: "human_rejection", authorType: "human", importance: 5, relatedCycleId: input.recentCycleId, extractedCycleCode: cycleCode, approvalIntent: "rejected" };
-  if (/set[- ]mission|mission is|set the mission/i.test(lower)) return { classification: "mission_update", authorType: "human", importance: 5, relatedCycleId: input.recentCycleId };
+  if (/set[- ]mission|mission is|set the mission|mission:/i.test(lower)) return { classification: "mission_update", authorType: "human", importance: 5, relatedCycleId: input.recentCycleId };
   if (mentionsAutoApp(text)) return { classification: "human_instruction", authorType: "human", importance: 4, relatedCycleId: input.recentCycleId, extractedCycleCode: cycleCode };
+  if (input.ts && /\?|start|begin|kick off|launch|run|improve|make|change|remember|also|actually|instead/i.test(lower)) return { classification: "human_instruction", authorType: "human", importance: 3, relatedCycleId: input.recentCycleId, extractedCycleCode: cycleCode };
   return { classification: "general_noise", authorType: "unknown", importance: 0, relatedCycleId: input.recentCycleId, extractedCycleCode: cycleCode };
 }
