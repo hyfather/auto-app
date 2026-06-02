@@ -153,8 +153,7 @@ export async function handleMention(text: string, userId: string, options: Handl
   const intent = await classifySlackMentionIntent(cleaned);
   if (intent.kind === "code_change" && intent.confidence >= 0.55) return startQuickChangeCycleText(intent.request, userId, options);
   if (intent.kind === "question" && intent.confidence >= 0.55) return answerQuestion(cleaned);
-  if (/\b(start|begin|kick off|launch|run)\b|propose|improve/.test(lower) && cleaned.length < 80) return startAutonomousCycleText(options);
-  if (/\?$/.test(cleaned)) return answerQuestion(cleaned);
+  if (intent.kind === "control" && /\b(start|begin|kick off|launch|run|propose)\b/i.test(cleaned)) return startAutonomousCycleText(options);
   return incorporateGuidanceAndMaybeStart(cleaned);
 }
 

@@ -73,6 +73,7 @@ See `.env.example` for required and optional variables:
 
 - `DATABASE_URL`
 - `OPENAI_API_KEY`
+- `OPENAI_API_BASE_URL` (optional): override OpenAI-compatible API base URL for local testing or compatible providers.
 - `OPENAI_SLACK_INTENT_MODEL` (optional): OpenAI model used to classify Slack mention intent; defaults to `gpt-4o-mini`.
 - `OPENAI_SLACK_ANSWER_MODEL` (optional): OpenAI model used for concise general Slack answers; defaults to `gpt-4o-mini`.
 - `SLACK_BOT_TOKEN`
