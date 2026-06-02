@@ -1,5 +1,5 @@
 export type ToolUpdate = {
-  source: "github" | "vercel" | "unknown";
+  source: "cursor" | "github" | "vercel" | "unknown";
   eventType: string;
   prUrl?: string;
   deploymentUrl?: string;
@@ -14,6 +14,15 @@ export function parseToolUpdate(text: string): ToolUpdate {
   const normalized = text.toLowerCase();
   const prUrl = text.match(prPattern)?.[0];
   const deploymentUrl = text.match(deploymentPattern)?.[0] || text.match(urlPattern)?.find((url) => /vercel/i.test(url));
+
+  if (/cursor|cloud agent|agent run/i.test(text)) {
+    if (/pull request|\bpr\b/i.test(text) && /opened|created/i.test(normalized)) return { source: "cursor", eventType: "pr_opened", prUrl, status: "opened" };
+    if (/pull request|\bpr\b|branch/i.test(text) && /updated|pushed|synchronize/i.test(normalized)) return { source: "cursor", eventType: "pr_updated", prUrl, status: "updated" };
+    if (/finished|complete|completed|done/i.test(normalized)) return { source: "cursor", eventType: "run_finished", prUrl, status: "finished" };
+    if (/fail|error|cancelled|canceled|expired/i.test(normalized)) return { source: "cursor", eventType: "run_failed", prUrl, status: "failed" };
+    if (/start|started|launch|launched|running|creating/i.test(normalized)) return { source: "cursor", eventType: "run_started", prUrl, status: "started" };
+    return { source: "cursor", eventType: "cursor_update", prUrl };
+  }
 
   if (/github|pull request|\bpr\b|checks?|merged|branch/i.test(text)) {
     if (/check/.test(normalized) && /pass|success|succeed|green/.test(normalized)) return { source: "github", eventType: "checks_passed", prUrl, status: "passed" };

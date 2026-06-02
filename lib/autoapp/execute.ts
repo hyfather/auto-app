@@ -93,7 +93,7 @@ export async function approveAndRequestAgent(cycleId: string, userId: string = A
 
   const prompt = buildImplementationPrompt(cycle, code);
   try {
-    const { agent, run } = await createCloudAgent({ prompt, name: `${code}: ${cycle.mission.title}`, autoCreatePR: true });
+    const { agent, run } = await createCloudAgent({ prompt, name: `${code}: ${cycle.mission.title}` });
     await prisma.cycle.update({
       where: { id: cycleId },
       data: { status: "waiting_for_agent", cursorAgentId: agent.id, cursorRunId: run.id, cursorAgentUrl: agent.url ?? null },
@@ -346,6 +346,10 @@ function getReadiness(pr: GitHubPullRequest, checks: PullRequestChecks | undefin
   eventType: string;
   waitingMessage?: string;
 } {
+  if (pr.base.ref !== "main") {
+    return { readyToMerge: false, status: "failed", resultSummary: `Pull request ${pr.html_url} targets ${pr.base.ref}, not main.`, eventType: "github_pr_wrong_base", waitingMessage: `${pr.html_url} targets ${pr.base.ref}, so I will not merge it. Cursor PRs must target main.` };
+  }
+
   if (pr.draft) {
     return { readyToMerge: false, status: "pr_opened", eventType: "github_pr_is_draft", waitingMessage: `${pr.html_url} is still a draft PR.` };
   }
