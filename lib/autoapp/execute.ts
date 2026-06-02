@@ -1,19 +1,31 @@
-import type { Cycle, Mission } from "@prisma/client";
+import type { Cycle, Mission, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { postToGeneral } from "@/lib/slack/postMessage";
 import {
   CursorApiError,
   createCloudAgent,
-  createFollowupRun,
   extractPrUrl,
   getAgent,
   getRun,
   isCursorConfigured,
   isTerminalRunStatus,
 } from "@/lib/cursor/client";
+import {
+  GitHubApiError,
+  getGitHubRepository,
+  getPullRequest,
+  getPullRequestChecks,
+  isGitHubConfigured,
+  listPullRequests,
+  mergePullRequest,
+  parsePullRequestUrl,
+  type GitHubPullRequest,
+  type PullRequestChecks,
+} from "@/lib/github/client";
 import { formatCycleCode, visibleLog } from "./policies";
 
 const AUTOAPP_ACTOR = "autoapp";
+const ACTIVE_PR_STATUSES = ["waiting_for_agent", "pr_opened", "waiting_for_checks", "waiting_for_preview_deploy", "preview_deployed", "waiting_for_merge"] as const;
 
 function buildImplementationPrompt(cycle: Cycle & { mission: Mission }, code: string): string {
   const constraints = cycle.forbiddenAreas
@@ -88,7 +100,7 @@ export async function approveAndRequestAgent(cycleId: string, userId: string = A
     });
     await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_launched", payload: { cycleId, agentId: agent.id, runId: run.id, url: agent.url ?? null }, relatedCycleId: cycleId } });
     await postToGeneral(visibleLog(code, "Action", `Launched a Cursor cloud agent to implement ${code}.${agent.url ? `\nAgent: ${agent.url}` : ""}`), threadTs);
-    await postToGeneral(visibleLog(code, "Waiting", "The cloud agent is implementing the change and will open a PR. I will watch its progress plus GitHub/Vercel updates, and request merge autonomously when it looks ready."), threadTs);
+    await postToGeneral(visibleLog(code, "Waiting", "The cloud agent is implementing the change and will open a PR. I will watch Cursor for the PR link, then watch and merge the PR through the GitHub API."), threadTs);
   } catch (error) {
     const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
     await prisma.cycle.update({ where: { id: cycleId }, data: { status: "failed", resultSummary: `Failed to launch Cursor cloud agent: ${detail}` } });
@@ -126,15 +138,18 @@ export async function pollCycleAgent(cycleId: string): Promise<boolean> {
   }
 
   let prUrl = extractPrUrl(run);
+  let headBranch = extractHeadBranch(run);
   if (!prUrl) {
     try {
-      prUrl = extractPrUrl(await getAgent(cycle.cursorAgentId));
+      const agent = await getAgent(cycle.cursorAgentId);
+      prUrl = extractPrUrl(agent);
+      headBranch ||= extractHeadBranch(agent);
     } catch {
       // best-effort enrichment only
     }
   }
 
-  const data: Record<string, unknown> = {};
+  const data: Prisma.CycleUpdateInput = {};
   if (prUrl && prUrl !== cycle.githubPrUrl) {
     data.githubPrUrl = prUrl;
     if (cycle.status === "waiting_for_agent") data.status = "pr_opened";
@@ -150,13 +165,13 @@ export async function pollCycleAgent(cycleId: string): Promise<boolean> {
     data.resultSummary = `Cursor cloud agent run ${run.status.toLowerCase()}.`;
     await postToGeneral(visibleLog(code, "Result", `The Cursor cloud agent run was ${run.status.toLowerCase()}.`), threadTs);
   } else if (run.status === "FINISHED" && prUrl) {
-    await postToGeneral(visibleLog(code, "Result", "The Cursor cloud agent finished implementing the change. Watching GitHub checks and Vercel preview before requesting merge."), threadTs);
+    await postToGeneral(visibleLog(code, "Result", "The Cursor cloud agent finished implementing the change. Watching GitHub PR checks and merge state now."), threadTs);
   }
 
   if (Object.keys(data).length) await prisma.cycle.update({ where: { id: cycleId }, data });
   await prisma.integrationEvent.create({ data: { source: "cursor", eventType: `run_${run.status.toLowerCase()}`, payload: { cycleId, runId: run.id, prUrl: prUrl ?? null }, relatedCycleId: cycleId } });
 
-  if (prUrl) await requestAutonomousMergeIfReady(cycleId);
+  if (prUrl || headBranch || cycle.githubPrUrl) await reconcileCyclePullRequest(cycleId, { prUrl, headBranch });
   return isTerminalRunStatus(run.status);
 }
 
@@ -165,7 +180,7 @@ export async function pollActiveAgents(): Promise<number> {
   const cycles = await prisma.cycle.findMany({
     where: {
       cursorAgentId: { not: null },
-      status: { in: ["waiting_for_agent", "pr_opened", "waiting_for_checks", "waiting_for_preview_deploy", "preview_deployed", "waiting_for_merge"] },
+      status: { in: [...ACTIVE_PR_STATUSES] },
     },
     select: { id: true },
   });
@@ -173,42 +188,201 @@ export async function pollActiveAgents(): Promise<number> {
   return cycles.length;
 }
 
-export async function requestAutonomousMergeIfReady(cycleId: string): Promise<boolean> {
-  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId }, include: { decisions: true } });
-  if (!cycle || cycle.status === "waiting_for_merge" || cycle.status === "completed" || cycle.status === "failed" || cycle.status === "rejected") return false;
-  if (!cycle.githubPrUrl || !cycle.vercelPreviewUrl) return false;
-  const alreadyRequested = cycle.decisions.some((decision) => decision.decision === "merge_recommended");
-  if (alreadyRequested) return false;
-
-  await prisma.decision.create({
-    data: {
-      cycleId,
-      decision: "merge_recommended",
-      decidedBySlackUserId: AUTOAPP_ACTOR,
-      rationale: "AutoApp saw a PR plus Vercel preview signal and is authorized to merge safe core changes without human approval.",
+/** Poll every active cycle with a PR or discoverable Cursor branch through GitHub. */
+export async function pollActivePullRequests(): Promise<number> {
+  const cycles = await prisma.cycle.findMany({
+    where: {
+      status: { in: [...ACTIVE_PR_STATUSES] },
+      OR: [{ githubPrUrl: { not: null } }, { cursorAgentId: { not: null } }],
     },
+    select: { id: true },
   });
-  await prisma.cycle.update({ where: { id: cycleId }, data: { status: "waiting_for_merge" } });
+  for (const cycle of cycles) await reconcileCyclePullRequest(cycle.id);
+  return cycles.length;
+}
 
+export async function requestAutonomousMergeIfReady(cycleId: string): Promise<boolean> {
+  return reconcileCyclePullRequest(cycleId);
+}
+
+export async function reconcileCyclePullRequest(cycleId: string, options: { prUrl?: string; headBranch?: string } = {}): Promise<boolean> {
+  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId }, include: { decisions: true } });
+  if (!cycle || cycle.status === "completed" || cycle.status === "failed" || cycle.status === "rejected") return false;
   const code = formatCycleCode(cycle.id);
   const threadTs = cycle.slackRootTs || undefined;
 
-  if (cycle.cursorAgentId && isCursorConfigured()) {
-    try {
-      await createFollowupRun(
-        cycle.cursorAgentId,
-        `Checks are green and the Vercel preview is ready for ${cycle.githubPrUrl}. If the implementation still satisfies the acceptance criteria, merge this pull request into the default branch. If you cannot merge, reply explaining what is blocking the merge.`,
-      );
-      await postToGeneral(visibleLog(code, "Action", `Asked the Cursor cloud agent to merge ${cycle.githubPrUrl} now that checks and preview look ready.`), threadTs);
-    } catch (error) {
-      const detail = error instanceof CursorApiError ? error.message : error instanceof Error ? error.message : "unknown error";
-      await postToGeneral(visibleLog(code, "Waiting", `Wanted to ask the cloud agent to merge ${cycle.githubPrUrl}, but the follow-up request failed (${detail}). The PR is ready for a human merge.`), threadTs);
-    }
-  } else {
-    await postToGeneral(visibleLog(code, "Action", `${cycle.githubPrUrl} looks ready to merge (checks green, preview deployed). A human can merge it, or configure a Cursor cloud agent to merge automatically.`), threadTs);
+  if (!isGitHubConfigured()) {
+    await postOnce(cycleId, "github_not_configured", code, "Waiting", "I found PR work to watch, but GitHub API access is not configured. Set `GITHUB_TOKEN` plus `GITHUB_REPOSITORY` (or keep `CURSOR_AGENT_REPO_URL`) so I can watch and merge PRs directly.", threadTs);
+    return false;
   }
-  await postToGeneral(visibleLog(code, "Waiting", "Merge requested. I will watch for GitHub merge and production Vercel deployment updates."), threadTs);
+
+  let pr: GitHubPullRequest | undefined;
+  try {
+    pr = await findCyclePullRequest(cycle, options);
+  } catch (error) {
+    const detail = error instanceof GitHubApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_watch_failed", payload: { cycleId, detail }, relatedCycleId: cycleId } });
+    return false;
+  }
+  if (!pr) return false;
+
+  const data: Prisma.CycleUpdateInput = {};
+  if (pr.html_url !== cycle.githubPrUrl) {
+    data.githubPrUrl = pr.html_url;
+    if (cycle.status === "waiting_for_agent") data.status = "pr_opened";
+    await postToGeneral(visibleLog(code, "Result", `Found the pull request through GitHub: ${pr.html_url}`), threadTs);
+  }
+
+  let checks: PullRequestChecks | undefined;
+  try {
+    if (pr.state === "open") checks = await getPullRequestChecks(pr.head.sha);
+  } catch (error) {
+    const detail = error instanceof GitHubApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_checks_failed_to_load", payload: { cycleId, prUrl: pr.html_url, detail }, relatedCycleId: cycleId } });
+    await postOnce(cycleId, "github_pr_checks_failed_to_load_notice", code, "Waiting", `I found ${pr.html_url}, but GitHub check status could not be loaded: ${detail}. I will keep polling.`, threadTs);
+    return false;
+  }
+  await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_state_polled", payload: { cycleId, prUrl: pr.html_url, state: pr.state, merged: pr.merged ?? false, draft: pr.draft, mergeable: pr.mergeable, mergeableState: pr.mergeable_state, checks: checks ?? null }, relatedCycleId: cycleId } });
+
+  if (pr.state === "closed") {
+    if (pr.merged) {
+      data.status = "waiting_for_production_deploy";
+      data.resultSummary = `Pull request ${pr.html_url} is merged; waiting for production deployment.`;
+      await postOnce(cycleId, "github_pr_merged_detected", code, "Result", `GitHub reports ${pr.html_url} is merged. I am watching for the production deployment now.`, threadTs);
+    } else {
+      data.status = "failed";
+      data.resultSummary = `Pull request ${pr.html_url} was closed without being merged.`;
+      await postOnce(cycleId, "github_pr_closed_unmerged", code, "Result", `GitHub reports ${pr.html_url} was closed without being merged. This cycle is stopped.`, threadTs);
+    }
+    await updateCycleIfNeeded(cycleId, data);
+    return true;
+  }
+
+  const readiness = getReadiness(pr, checks);
+  if (readiness.status) data.status = readiness.status;
+  if (readiness.resultSummary) data.resultSummary = readiness.resultSummary;
+  await updateCycleIfNeeded(cycleId, data);
+
+  if (!readiness.readyToMerge) {
+    if (readiness.waitingMessage) await postOnce(cycleId, readiness.eventType, code, "Waiting", readiness.waitingMessage, threadTs);
+    return true;
+  }
+
+  const alreadyRecommended = cycle.decisions.some((decision) => decision.decision === "merge_recommended");
+  if (!alreadyRecommended) {
+    await prisma.decision.create({
+      data: {
+        cycleId,
+        decision: "merge_recommended",
+        decidedBySlackUserId: AUTOAPP_ACTOR,
+        rationale: "AutoApp saw a mergeable PR with passing GitHub checks and is authorized to merge safe core changes without human approval.",
+      },
+    });
+  }
+
+  try {
+    const result = await mergePullRequest(pr);
+    await prisma.cycle.update({ where: { id: cycleId }, data: { status: "waiting_for_production_deploy", resultSummary: `Merged ${pr.html_url} via GitHub API at ${result.sha}; waiting for production deployment.` } });
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_merged_by_autoapp", payload: { cycleId, prUrl: pr.html_url, sha: result.sha, message: result.message }, relatedCycleId: cycleId } });
+    await postToGeneral(visibleLog(code, "Action", `Merged ${pr.html_url} through the GitHub API. I will watch for the production Vercel deployment update.`), threadTs);
+  } catch (error) {
+    const detail = error instanceof GitHubApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
+    await prisma.cycle.update({ where: { id: cycleId }, data: { status: "waiting_for_merge", resultSummary: `GitHub merge attempt failed: ${detail}` } });
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_merge_failed", payload: { cycleId, prUrl: pr.html_url, detail }, relatedCycleId: cycleId } });
+    await postOnce(cycleId, "github_pr_merge_failed_notice", code, "Waiting", `GitHub says ${pr.html_url} is ready, but the merge API call failed: ${detail}. I will keep watching the PR for a retryable state.`, threadTs);
+  }
   return true;
+}
+
+function extractHeadBranch(source: { git?: { branches?: Array<{ branch?: string; prUrl?: string }> } } | undefined): string | undefined {
+  const branches = source?.git?.branches || [];
+  return branches.find((branch) => branch.prUrl && branch.branch)?.branch || branches.find((branch) => branch.branch)?.branch;
+}
+
+async function findCyclePullRequest(cycle: Cycle, options: { prUrl?: string; headBranch?: string }): Promise<GitHubPullRequest | undefined> {
+  for (const prUrl of [options.prUrl, cycle.githubPrUrl].filter(Boolean) as string[]) {
+    if (!parsePullRequestUrl(prUrl)) continue;
+    try {
+      return await getPullRequest(prUrl);
+    } catch (error) {
+      if (!(error instanceof GitHubApiError) || error.status !== 404) throw error;
+    }
+  }
+
+  const repository = getGitHubRepository();
+  const headBranch = normalizeBranchName(options.headBranch);
+  if (repository && headBranch) {
+    const head = headBranch.includes(":") ? headBranch : `${repository.owner}:${headBranch}`;
+    const [pr] = await listPullRequests({ state: "all", head, perPage: 5 });
+    if (pr) return pr;
+  }
+
+  const code = formatCycleCode(cycle.id).toLowerCase();
+  const recentOpenPrs = await listPullRequests({ state: "open", perPage: 20 });
+  const codeMatch = recentOpenPrs.find((pr) => [pr.title, pr.body || "", pr.head.ref].some((value) => value.toLowerCase().includes(code)));
+  if (codeMatch) return codeMatch;
+
+  const authorLogin = process.env.GITHUB_CURSOR_AUTHOR_LOGIN?.trim();
+  const createdAfter = cycle.createdAt.getTime() - 5 * 60 * 1000;
+  const recentCandidates = recentOpenPrs.filter((pr) => {
+    if (new Date(pr.created_at).getTime() < createdAfter) return false;
+    return !authorLogin || pr.user?.login === authorLogin;
+  });
+  return recentCandidates.length === 1 ? recentCandidates[0] : undefined;
+}
+
+function normalizeBranchName(branch: string | undefined): string | undefined {
+  return branch?.trim().replace(/^refs\/heads\//, "") || undefined;
+}
+
+function checksRequired(): boolean {
+  return process.env.GITHUB_MERGE_REQUIRE_CHECKS !== "false";
+}
+
+function getReadiness(pr: GitHubPullRequest, checks: PullRequestChecks | undefined): {
+  readyToMerge: boolean;
+  status?: "pr_opened" | "waiting_for_checks" | "waiting_for_merge" | "failed";
+  resultSummary?: string;
+  eventType: string;
+  waitingMessage?: string;
+} {
+  if (pr.draft) {
+    return { readyToMerge: false, status: "pr_opened", eventType: "github_pr_is_draft", waitingMessage: `${pr.html_url} is still a draft PR.` };
+  }
+
+  if (!checks) {
+    return { readyToMerge: false, status: "waiting_for_checks", eventType: "github_pr_checks_missing", waitingMessage: `Waiting for GitHub checks on ${pr.html_url}.` };
+  }
+
+  if (checks.state === "failure") {
+    const failing = checks.failing.join(", ") || "unknown failing check";
+    return { readyToMerge: false, status: "failed", resultSummary: `GitHub checks failed for ${pr.html_url}: ${failing}.`, eventType: "github_pr_checks_failed", waitingMessage: `GitHub checks failed for ${pr.html_url}: ${failing}. This cycle is stopped.` };
+  }
+
+  if (checks.state === "pending") {
+    return { readyToMerge: false, status: "waiting_for_checks", eventType: "github_pr_checks_pending", waitingMessage: `Waiting for GitHub checks on ${pr.html_url}: ${checks.pending.join(", ") || "pending checks"}.` };
+  }
+
+  if (checks.state === "none" && checksRequired()) {
+    return { readyToMerge: false, status: "waiting_for_checks", eventType: "github_pr_checks_none", waitingMessage: `GitHub has not reported any checks for ${pr.html_url} yet.` };
+  }
+
+  if (pr.mergeable === false) {
+    return { readyToMerge: false, status: "waiting_for_merge", resultSummary: `GitHub reports ${pr.html_url} is not mergeable (${pr.mergeable_state || "unknown"}).`, eventType: "github_pr_not_mergeable", waitingMessage: `GitHub reports ${pr.html_url} is not mergeable yet (${pr.mergeable_state || "unknown"}).` };
+  }
+
+  return { readyToMerge: true, status: "waiting_for_merge", eventType: "github_pr_ready_to_merge" };
+}
+
+async function updateCycleIfNeeded(cycleId: string, data: Prisma.CycleUpdateInput): Promise<void> {
+  if (Object.keys(data).length) await prisma.cycle.update({ where: { id: cycleId }, data });
+}
+
+async function postOnce(cycleId: string, eventType: string, code: string, label: string, body: string, threadTs?: string): Promise<void> {
+  const existing = await prisma.integrationEvent.findFirst({ where: { relatedCycleId: cycleId, eventType } });
+  if (existing) return;
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType, payload: { cycleId, body }, relatedCycleId: cycleId } });
+  await postToGeneral(visibleLog(code, label, body), threadTs);
 }
 
 export async function completeCycle(cycleId: string, resultSummary: string) {

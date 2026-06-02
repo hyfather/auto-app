@@ -80,13 +80,13 @@ export async function getStatusText() {
 async function startAutonomousCycleText(options: HandlerOptions = {}): Promise<string> {
   if (options.threadTs) await postToGeneral("[AutoApp] Start received. I’ll keep every update in this thread.", options.threadTs);
   const result = await runObservationCycle({ post: true, threadTs: options.threadTs });
-  if (result.status === "active_cycle_exists") return `I already have an active OODA cycle (${result.cycle.status}). I’ll keep watching the Cursor cloud agent plus GitHub/Vercel updates. Use \`@autoapp abort\` if you want to discard it and start fresh.`;
+  if (result.status === "active_cycle_exists") return `I already have an active OODA cycle (${result.cycle.status}). I’ll keep watching the Cursor cloud agent and GitHub PR state. Use \`@autoapp abort\` if you want to discard it and start fresh.`;
   if (result.status === "no_mission") return "I need a mission first. Say `@autoapp start <what to build>` or `/autoapp set-mission <mission>`.";
   if (result.status === "paused") return "The mission is paused. Use `@autoapp resume` when you want me to continue, or `@autoapp abort` to start fresh.";
   if (options.threadTs) await postToGeneral("[AutoApp] Proposal recorded. Launching a Cursor cloud agent to implement now...", options.threadTs);
   await autonomouslyApproveAndRequestAgent(result.cycle.id);
   await logAutoappEvent("cycle_started", { cycleId: result.cycle.id, threadTs: options.threadTs, sourceTs: options.sourceTs });
-  return "Started an autonomous OODA cycle: observed the app, oriented around the mission, decided on the next small change, and launched a Cursor cloud agent to implement it. I’ll stream follow-up logs in this thread and request merge when it looks ready.";
+  return "Started an autonomous OODA cycle: observed the app, oriented around the mission, decided on the next small change, and launched a Cursor cloud agent to implement it. I’ll stream follow-up logs in this thread, watch the PR through GitHub, and merge it through the GitHub API when ready.";
 }
 
 function missionFromMention(text: string) {
@@ -128,7 +128,7 @@ export async function handleMention(text: string, userId: string, options: Handl
     if (!cycle || cycle.status !== "proposed") return "No proposed cycle is waiting for approval. I’m already allowed to start and merge safe OODA-loop changes autonomously.";
     await approveAndRequestAgent(cycle.id, userId, options.sourceTs);
     await logAutoappEvent("cycle_approved", { cycleId: cycle.id, userId, threadTs: options.threadTs });
-    return "Approval recorded. I launched a Cursor cloud agent to implement it; progress will stream in this thread.";
+    return "Approval recorded. I launched a Cursor cloud agent to implement it; I will watch the resulting PR through GitHub and stream progress in this thread.";
   }
   if (/reject|\bno\b|stop|cancel|do not/.test(lower)) {
     const cycle = await getActiveCycle();
