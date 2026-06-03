@@ -1,10 +1,13 @@
-import { getLatestCycle } from "./cycle";
-import { formatCycleCode } from "./policies";
+import { getLatestTask } from "./task";
+import { formatTaskCode } from "./policies";
 
-export async function summarizeLatestCycle() {
-  const cycle = await getLatestCycle();
-  if (!cycle) return "No cycles have been created yet.";
-  const code = formatCycleCode(cycle.id);
-  const updates = cycle.memories.map((m) => `- ${m.classification}: ${m.normalizedText}`).join("\n") || "No related Slack updates recorded yet.";
-  return `[${code}] Result\nStatus: ${cycle.status}.\nMission: ${cycle.mission.title}.\nProposal: ${cycle.proposal}.\nLatest related updates:\n${updates}\nNext step: ${cycle.status === "proposed" ? "AutoApp can approve and execute autonomously; use reject/pause only if you want to stop it." : "Keep watching #general for GitHub/Vercel updates while the Cursor cloud agent works."}`;
+export async function summarizeLatestTask() {
+  const task = await getLatestTask();
+  if (!task) return "No tasks have been created yet. Ask for a code change like `@autoapp add a pricing FAQ section`.";
+  const code = formatTaskCode(task.id);
+  const updates = task.memories.map((m) => `- ${m.classification}: ${m.normalizedText}`).join("\n") || "No related Slack updates recorded yet.";
+  const nextStep = task.status === "completed" || task.status === "failed" || task.status === "cancelled"
+    ? "This task is finished. Ask AutoApp for another change when you're ready."
+    : "Watching #general for GitHub/Vercel updates while the Cursor cloud agent works.";
+  return `[${code}] Summary\nStatus: ${task.status}.\nRequest: ${task.request}.${task.githubPrUrl ? `\nPR: ${task.githubPrUrl}` : ""}\nLatest related updates:\n${updates}\nNext step: ${nextStep}`;
 }

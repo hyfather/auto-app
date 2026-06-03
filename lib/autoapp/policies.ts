@@ -1,3 +1,7 @@
+/**
+ * Default areas the implementation worker must never touch. These become the
+ * "Don't" half of the do/don't guardrails injected into every task prompt.
+ */
 export const DEFAULT_FORBIDDEN_AREAS = [
   "auth",
   "secrets",
@@ -10,20 +14,20 @@ export const DEFAULT_FORBIDDEN_AREAS = [
   "database migrations unless explicitly approved",
 ];
 
-export const DEFAULT_CONSTRAINTS = [
-  "Keep the diff small and PR-sized",
-  "Prefer UI/copy changes before risky infrastructure changes",
+/**
+ * The "Do" half of the guardrails injected into every task prompt. These keep
+ * the cloud agent's change small, reviewable, and shippable.
+ */
+export const DEFAULT_DOS = [
+  "Keep the diff small and focused",
+  "Open a pull request against the default branch with a short, descriptive summary",
+  "Verify the changed behavior before opening or updating the PR",
   "Do not add an /admin UI",
-  "Autonomously merge safe core PRs after the cloud agent, GitHub, and Vercel signals satisfy acceptance criteria",
-  "Open a PR against main",
-  "Include a short PR summary",
 ];
 
-export const ACTIVE_CYCLE_STATUSES = [
-  "observing",
-  "proposed",
-  "approved",
-  "running",
+/** Task statuses that count as "in flight" against the parallelism cap. */
+export const ACTIVE_TASK_STATUSES = [
+  "queued",
   "waiting_for_agent",
   "pr_opened",
   "waiting_for_checks",
@@ -34,10 +38,10 @@ export const ACTIVE_CYCLE_STATUSES = [
   "production_deployed",
 ] as const;
 
-export function formatCycleCode(cycleId: string) {
-  return `AUTO-${cycleId.slice(-6).toUpperCase()}`;
+export function formatTaskCode(taskId: string) {
+  return `AUTO-${taskId.slice(-6).toUpperCase()}`;
 }
 
-export function visibleLog(cycleCode: string, label: string, body: string) {
-  return `[${cycleCode}] ${label}\n${body.trim()}`;
+export function visibleLog(taskCode: string, label: string, body: string) {
+  return `[${taskCode}] ${label}\n${body.trim()}`;
 }

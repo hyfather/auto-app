@@ -7,17 +7,8 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-enum MissionStatus {
-  active
-  paused
-  archived
-}
-
-enum CycleStatus {
-  observing
-  proposed
-  approved
-  running
+enum TaskStatus {
+  queued
   waiting_for_agent
   pr_opened
   waiting_for_checks
@@ -28,13 +19,7 @@ enum CycleStatus {
   production_deployed
   completed
   failed
-  rejected
-}
-
-enum RiskLevel {
-  low
-  medium
-  high
+  cancelled
 }
 
 enum AuthorType {
@@ -54,18 +39,13 @@ enum MemoryClassification {
   github_update
   vercel_update
   autoapp_log
-  mission_update
   general_noise
   unknown
 }
 
 enum DecisionType {
-  approved
-  rejected
-  paused
-  resumed
   merge_recommended
-  rollback_requested
+  cancelled
 }
 
 enum IntegrationSource {
@@ -76,28 +56,10 @@ enum IntegrationSource {
   autoapp
 }
 
-model Mission {
-  id              String           @id @default(cuid())
-  title           String
-  description     String
-  successCriteria String
-  targetAudience  String?
-  status          MissionStatus    @default(active)
-  createdAt       DateTime         @default(now())
-  updatedAt       DateTime         @updatedAt
-  cycles          Cycle[]
-  snapshots       WebAppSnapshot[]
-}
-
-model Cycle {
+model Task {
   id                  String             @id @default(cuid())
-  missionId           String
-  mission             Mission            @relation(fields: [missionId], references: [id], onDelete: Cascade)
-  status              CycleStatus        @default(observing)
-  observation         String
-  proposal            String
-  rationale           String
-  riskLevel           RiskLevel          @default(low)
+  status              TaskStatus         @default(queued)
+  request             String
   acceptanceCriteria  String
   forbiddenAreas      String
   slackRootTs         String?
@@ -126,11 +88,11 @@ model SlackMemory {
   normalizedText         String
   classification         MemoryClassification @default(unknown)
   importance             Int                  @default(0)
-  relatedCycleId         String?
-  relatedCycle           Cycle?               @relation(fields: [relatedCycleId], references: [id])
+  relatedTaskId          String?
+  relatedTask            Task?                @relation(fields: [relatedTaskId], references: [id])
   extractedPrUrl         String?
   extractedDeploymentUrl String?
-  extractedCycleCode     String?
+  extractedTaskCode      String?
   createdAt              DateTime             @default(now())
 
   @@unique([channelId, messageTs])
@@ -140,8 +102,8 @@ model SlackMemory {
 
 model Decision {
   id                   String       @id @default(cuid())
-  cycleId              String
-  cycle                Cycle        @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  taskId               String
+  task                 Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
   decision             DecisionType
   decidedBySlackUserId String
   rationale            String?
@@ -150,13 +112,13 @@ model Decision {
 }
 
 model IntegrationEvent {
-  id             String            @id @default(cuid())
-  source         IntegrationSource
-  eventType      String
-  payload        Json
-  relatedCycleId String?
-  relatedCycle   Cycle?            @relation(fields: [relatedCycleId], references: [id])
-  createdAt      DateTime          @default(now())
+  id            String            @id @default(cuid())
+  source        IntegrationSource
+  eventType     String
+  payload       Json
+  relatedTaskId String?
+  relatedTask   Task?             @relation(fields: [relatedTaskId], references: [id])
+  createdAt     DateTime          @default(now())
 
   @@index([source, eventType, createdAt])
 }
@@ -168,17 +130,4 @@ model LaunchSubscriber {
   createdAt DateTime @default(now())
 
   @@index([createdAt])
-}
-
-model WebAppSnapshot {
-  id                String   @id @default(cuid())
-  missionId         String
-  mission           Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
-  url               String
-  title             String?
-  description       String?
-  extractedText     String
-  evaluationSummary String
-  alignmentScore    Int?
-  createdAt         DateTime @default(now())
 }
