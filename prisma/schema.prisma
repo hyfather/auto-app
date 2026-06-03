@@ -161,6 +161,15 @@ model IntegrationEvent {
   @@index([source, eventType, createdAt])
 }
 
+model LaunchSubscriber {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  source    String   @default("landing_page")
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 model WebAppSnapshot {
   id                String   @id @default(cuid())
   missionId         String
