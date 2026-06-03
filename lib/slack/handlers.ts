@@ -438,7 +438,7 @@ async function updateCycleFromTool(cycleId: string, tool: ReturnType<typeof pars
   if (tool.prUrl) data.githubPrUrl = tool.prUrl;
   if (tool.deploymentUrl && tool.eventType.startsWith("preview")) data.vercelPreviewUrl = tool.deploymentUrl;
   if (tool.deploymentUrl && tool.eventType.startsWith("production")) data.vercelProductionUrl = tool.deploymentUrl;
-  const statusMap: Record<string, string> = { pr_opened: "pr_opened", pr_updated: "pr_opened", run_failed: "failed", checks_started: "waiting_for_checks", checks_passed: "waiting_for_preview_deploy", checks_failed: "failed", pr_merged: "waiting_for_production_deploy", preview_deployment_started: "waiting_for_preview_deploy", preview_deployment_ready: "preview_deployed", preview_deployment_failed: "failed", production_deployment_started: "waiting_for_production_deploy", production_deployment_ready: "completed", production_deployment_failed: "failed" };
+  const statusMap: Record<string, string> = { pr_opened: "pr_opened", pr_updated: "pr_opened", run_failed: "failed", checks_started: "waiting_for_checks", checks_passed: "waiting_for_preview_deploy", checks_failed: "failed", pr_merged: "completed", preview_deployment_started: "waiting_for_preview_deploy", preview_deployment_ready: "preview_deployed", preview_deployment_failed: "failed", production_deployment_started: "waiting_for_production_deploy", production_deployment_ready: "completed", production_deployment_failed: "failed" };
   if (statusMap[tool.eventType]) data.status = statusMap[tool.eventType];
   if (Object.keys(data).length) await prisma.cycle.update({ where: { id: cycleId }, data });
   await logAutoappEvent("tool_update", { cycleId, tool });
@@ -446,7 +446,14 @@ async function updateCycleFromTool(cycleId: string, tool: ReturnType<typeof pars
   const threadTs = cycle?.slackRootTs || undefined;
   await postToGeneral(`[${tool.source}] ${tool.eventType}${tool.prUrl ? ` — ${tool.prUrl}` : ""}${tool.deploymentUrl ? ` — ${tool.deploymentUrl}` : ""}`, threadTs);
   if (["pr_opened", "pr_updated", "run_finished", "checks_passed", "preview_deployment_ready"].includes(tool.eventType)) await requestAutonomousMergeIfReady(cycleId);
-  if (tool.eventType === "production_deployment_ready") await completeCycle(cycleId, "Production deployment is ready after the autonomous PR merge.");
+  // A merged PR on main is the success condition: the change is live on the
+  // default branch, so close the loop on merge instead of waiting for a
+  // separate production-deploy notification (which may never arrive).
+  if (tool.eventType === "pr_merged") {
+    await completeCycle(cycleId, `${tool.prUrl ? `Pull request ${tool.prUrl}` : "The pull request"} is merged into main, so the change is live on the default branch. Marking this cycle successful.`);
+  } else if (tool.eventType === "production_deployment_ready") {
+    await completeCycle(cycleId, "Production deployment is ready after the autonomous PR merge.");
+  }
 }
 
 async function logAutoappEvent(eventType: string, payload: Record<string, unknown>) {
