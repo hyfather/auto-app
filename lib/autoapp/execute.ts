@@ -280,6 +280,33 @@ export async function requestAutonomousMergeIfReady(cycleId: string): Promise<bo
 }
 
 /**
+ * Statuses a cycle could be parked in after its PR merged but before this build
+ * closed the loop directly on merge. A merged change on `main` is AutoApp's
+ * success condition, so any cycle still sitting here is finished and should be
+ * completed — without waiting for a Vercel production-deploy Slack notification.
+ */
+const POST_MERGE_PENDING_STATUSES = ["waiting_for_production_deploy", "production_deployed"] as const;
+
+/**
+ * Complete any cycle whose PR already merged but that is lingering in a
+ * post-merge "waiting for the production deployment" state. Closing the loop on
+ * merge is the primary path; this sweep recovers cycles that entered the wait
+ * state before this behavior change (or via a Slack-driven status update), so
+ * the loop never gets permanently stuck once the code is live on main.
+ */
+export async function completeMergedCycles(): Promise<number> {
+  const cycles = await prisma.cycle.findMany({
+    where: { status: { in: [...POST_MERGE_PENDING_STATUSES] } },
+    select: { id: true, githubPrUrl: true },
+  });
+  for (const cycle of cycles) {
+    const prRef = cycle.githubPrUrl ? `Pull request ${cycle.githubPrUrl}` : "The pull request";
+    await completeCycle(cycle.id, `${prRef} is merged into main, so the change is live on the default branch. Marking this cycle successful.`);
+  }
+  return cycles.length;
+}
+
+/**
  * Best-effort, non-blocking advance of every in-flight cycle: poll Cursor runs
  * for newly opened PRs, then reconcile/merge open PRs through GitHub. This is
  * the same work the `/api/cron/observe` scheduler does, exposed so any Slack
@@ -287,14 +314,15 @@ export async function requestAutonomousMergeIfReady(cycleId: string): Promise<bo
  * from getting stuck in `waiting_for_agent` (with its PR never discovered or
  * merged) when the scheduled cron is delayed or not configured. Never throws.
  */
-export async function nudgeActiveCycles(): Promise<{ polledAgents: number; polledPullRequests: number }> {
+export async function nudgeActiveCycles(): Promise<{ polledAgents: number; polledPullRequests: number; completedMerged: number }> {
   try {
     const polledAgents = await pollActiveAgents();
     const polledPullRequests = await pollActivePullRequests();
-    return { polledAgents, polledPullRequests };
+    const completedMerged = await completeMergedCycles();
+    return { polledAgents, polledPullRequests, completedMerged };
   } catch (error) {
     console.error("[AutoApp] Failed to advance active cycles:", error instanceof Error ? error.message : error);
-    return { polledAgents: 0, polledPullRequests: 0 };
+    return { polledAgents: 0, polledPullRequests: 0, completedMerged: 0 };
   }
 }
 
@@ -339,15 +367,18 @@ export async function reconcileCyclePullRequest(cycleId: string, options: { prUr
 
   if (pr.state === "closed") {
     if (pr.merged) {
-      data.status = "waiting_for_production_deploy";
-      data.resultSummary = `Pull request ${pr.html_url} is merged; waiting for production deployment.`;
-      await postOnce(cycleId, "github_pr_merged_detected", code, "Result", `GitHub reports ${pr.html_url} is merged. I am watching for the production deployment now.`, threadTs);
+      // A merged PR on the default branch is AutoApp's success condition. The
+      // change is live on main, so we close the loop here instead of blocking
+      // on a separate Vercel production-deploy signal that may never arrive.
+      await updateCycleIfNeeded(cycleId, data);
+      await postOnce(cycleId, "github_pr_merged_detected", code, "Result", `GitHub reports ${pr.html_url} is merged into main.`, threadTs);
+      await completeCycle(cycleId, `Pull request ${pr.html_url} is merged into main, so the change is live on the default branch. Marking this cycle successful.`);
     } else {
       data.status = "failed";
       data.resultSummary = `Pull request ${pr.html_url} was closed without being merged.`;
       await postOnce(cycleId, "github_pr_closed_unmerged", code, "Result", `GitHub reports ${pr.html_url} was closed without being merged. This cycle is stopped.`, threadTs);
+      await updateCycleIfNeeded(cycleId, data);
     }
-    await updateCycleIfNeeded(cycleId, data);
     return true;
   }
 
@@ -375,9 +406,11 @@ export async function reconcileCyclePullRequest(cycleId: string, options: { prUr
 
   try {
     const result = await mergePullRequest(pr);
-    await prisma.cycle.update({ where: { id: cycleId }, data: { status: "waiting_for_production_deploy", resultSummary: `Merged ${pr.html_url} via GitHub API at ${result.sha}; waiting for production deployment.` } });
     await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_merged_by_autoapp", payload: { cycleId, prUrl: pr.html_url, sha: result.sha, message: result.message }, relatedCycleId: cycleId } });
-    await postToGeneral(visibleLog(code, "Action", `Merged ${pr.html_url} through the GitHub API. I will watch for the production Vercel deployment update.`), threadTs);
+    await postToGeneral(visibleLog(code, "Action", `Merged ${pr.html_url} through the GitHub API at ${result.sha}.`), threadTs);
+    // The merge landed on main, so the change is live on the default branch.
+    // Close the loop now rather than waiting for a production-deploy signal.
+    await completeCycle(cycleId, `Merged ${pr.html_url} into main via the GitHub API at ${result.sha}. The change is on the default branch, so this cycle is successful.`);
   } catch (error) {
     const detail = error instanceof GitHubApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
     await prisma.cycle.update({ where: { id: cycleId }, data: { status: "waiting_for_merge", resultSummary: `GitHub merge attempt failed: ${detail}` } });
