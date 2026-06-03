@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { after } from "next/server";
 import { handleMention, recordSlackMessage } from "@/lib/slack/handlers";
-import { nudgeActiveCycles } from "@/lib/autoapp/execute";
+import { nudgeActiveTasks } from "@/lib/autoapp/execute";
 import { postToGeneral } from "@/lib/slack/postMessage";
 import { verifySlackRequest } from "@/lib/slack/verify";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
@@ -25,7 +25,7 @@ function mentionsAutoapp(text: string) {
 function shouldHandleConversationalReply(event: SlackEvent) {
   if (!event.thread_ts || event.bot_id || !event.user) return false;
   const text = event.text || "";
-  return /\?|mission|start|begin|kick off|launch|run|improve|make|change|remember|also|actually|instead|status/i.test(text);
+  return /\?|task|start|begin|kick off|launch|run|improve|make|change|remember|also|actually|instead|status/i.test(text);
 }
 
 function shouldReplyInThread(text: string, mentions: boolean, threadTs?: string) {
@@ -93,7 +93,7 @@ export async function POST(req: Request) {
     } catch (error) {
       console.error("[Slack events] Unhandled processing error:", error instanceof Error ? error.message : error);
     }
-    await nudgeActiveCycles();
+    await nudgeActiveTasks();
   });
 
   return NextResponse.json({ ok: true });

@@ -1,38 +1,15 @@
 import { NextResponse } from "next/server";
 import { after } from "next/server";
 import { handleAutoappCommand } from "@/lib/slack/handlers";
-import { nudgeActiveCycles } from "@/lib/autoapp/execute";
+import { nudgeActiveTasks } from "@/lib/autoapp/execute";
 import { verifySlackRequest } from "@/lib/slack/verify";
 
-// Fast subcommands that only touch the database and reliably reply within
-// Slack's 3s slash-command budget. Anything else — `start`, `propose`, and
-// freeform code-change requests that classify intent and launch a Cursor cloud
-// agent — is acknowledged instantly and finished in the background, with the
-// final reply delivered via response_url.
-const SYNCHRONOUS_COMMANDS = new Set([
-  "help",
-  "controls",
-  "status",
-  "prs",
-  "pulls",
-  "pull-requests",
-  "pullrequests",
-  "pr",
-  "deployments",
-  "deployment",
-  "deploys",
-  "deploy",
-  "github",
-  "gh",
-  "mission",
-  "set-mission",
-  "pause",
-  "resume",
-  "abort",
-  "reset",
-  "fresh-start",
-  "summarize",
-]);
+// Only `help`/`controls` reply with a static string that fits inside Slack's 3s
+// slash-command budget. Everything else is routed through the tool-calling
+// agent (which may call the OpenAI API and/or launch a Cursor cloud agent), so
+// it is acknowledged instantly and finished in the background, with the final
+// reply delivered via response_url.
+const SYNCHRONOUS_COMMANDS = new Set(["help", "controls"]);
 
 async function postToResponseUrl(responseUrl: string, text: string) {
   try {
@@ -56,11 +33,11 @@ export async function POST(req: Request) {
   const userId = form.get("user_id") || "unknown";
   const command = (text.split(/\s+/)[0] || "help").toLowerCase();
 
-  // Every slash interaction also nudges any in-flight cycle forward (discover a
+  // Every slash interaction also nudges any in-flight task forward (discover a
   // newly opened PR, watch checks, merge when ready) so the loop keeps moving
   // even between scheduled cron runs.
   after(async () => {
-    await nudgeActiveCycles();
+    await nudgeActiveTasks();
   });
 
   if (responseUrl && !SYNCHRONOUS_COMMANDS.has(command)) {
@@ -73,7 +50,7 @@ export async function POST(req: Request) {
         await postToResponseUrl(responseUrl, "Something went wrong running that command. Check #general for any partial progress, then try again.");
       }
     });
-    return NextResponse.json({ response_type: "ephemeral", text: "On it — running that now. I'll stream progress in #general and reply here when the cycle is set up." });
+    return NextResponse.json({ response_type: "ephemeral", text: "On it — running that now. I'll stream progress in #general and reply here when the task is set up." });
   }
 
   try {

@@ -1,4 +1,4 @@
-import type { Cycle, Mission, Prisma } from "@prisma/client";
+import type { Task, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { postToGeneral } from "@/lib/slack/postMessage";
 import {
@@ -25,8 +25,8 @@ import {
   type GitHubPullRequest,
   type PullRequestChecks,
 } from "@/lib/github/client";
-import { MAX_ACTIVE_CYCLES } from "./cycle";
-import { ACTIVE_CYCLE_STATUSES, DEFAULT_FORBIDDEN_AREAS, formatCycleCode, visibleLog } from "./policies";
+import { MAX_ACTIVE_TASKS } from "./task";
+import { ACTIVE_TASK_STATUSES, DEFAULT_DOS, DEFAULT_FORBIDDEN_AREAS, formatTaskCode, visibleLog } from "./policies";
 
 const AUTOAPP_ACTOR = "autoapp";
 const ACTIVE_PR_STATUSES = ["waiting_for_agent", "pr_opened", "waiting_for_checks", "waiting_for_preview_deploy", "preview_deployed", "waiting_for_merge"] as const;
@@ -54,35 +54,36 @@ export function autoMergeInstruction(): string {
   ].join("\n");
 }
 
-function buildImplementationPrompt(cycle: Cycle & { mission: Mission }, code: string): string {
-  const constraints = cycle.forbiddenAreas
+/**
+ * Build the prompt sent to the Cursor cloud agent for a task. It is intentionally
+ * focused: the task request plus do/don't guardrails and acceptance criteria —
+ * no mission framing and no web-app evaluation noise.
+ */
+function buildImplementationPrompt(task: Task, code: string): string {
+  const donts = task.forbiddenAreas
     .split("\n")
     .map((item) => item.trim())
     .filter(Boolean)
-    .map((item) => `* Do not change ${item}`)
+    .map((item) => `* Don't change ${item}`)
     .join("\n");
-  const acceptance = cycle.acceptanceCriteria
+  const dos = DEFAULT_DOS.map((item) => `* ${item}`).join("\n");
+  const acceptance = task.acceptanceCriteria
     .split("\n")
     .map((item) => item.trim())
     .filter(Boolean)
     .map((item) => `* ${item}`)
     .join("\n");
-  return `You are AutoApp's implementation worker, operating cycle ${code}.
-
-Mission:
-${cycle.mission.title}
-
-Current web app evaluation summary:
-${cycle.observation}
+  return `You are AutoApp's implementation worker for task ${code}.
 
 Task:
-${cycle.proposal}
+${task.request}
 
-Constraints:
-${constraints}
-* Keep the diff small and focused
-* Open a pull request against the default branch with a short, descriptive summary
-* Do not modify auth, secrets, environment variables, billing, or deployment configuration
+Do:
+${dos}
+
+Don't:
+${donts}
+* Don't modify auth, secrets, environment variables, billing, or deployment configuration
 
 Acceptance criteria:
 ${acceptance}
@@ -90,88 +91,29 @@ ${autoMergeInstruction()}`;
 }
 
 /**
- * Approve a proposed cycle and dispatch the work to a Cursor cloud agent.
- * Designed to never throw on Slack/API failures — it records status and posts
- * a human-readable explanation instead, so the Slack control plane stays usable.
+ * Create a new task and immediately dispatch it to a Cursor cloud agent.
+ * AutoApp runs at most `MAX_ACTIVE_TASKS` in parallel; when that many tasks are
+ * already in flight a new request is turned away (not queued).
  */
-export async function approveAndRequestAgent(cycleId: string, userId: string = AUTOAPP_ACTOR, slackMessageTs?: string): Promise<void> {
-  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId }, include: { mission: true } });
-  if (!cycle) throw new Error("No cycle found to approve.");
-  if (cycle.status !== "proposed") throw new Error("Only a proposed cycle can be approved.");
-
-  await prisma.decision.create({
-    data: {
-      cycleId,
-      decision: "approved",
-      decidedBySlackUserId: userId,
-      slackMessageTs,
-      rationale: userId === AUTOAPP_ACTOR ? "AutoApp approved this OODA cycle autonomously under the active mission." : "Human approved the proposed AutoApp cycle in Slack.",
-    },
-  });
-  await prisma.cycle.update({ where: { id: cycleId }, data: { status: "approved" } });
-
-  const code = formatCycleCode(cycle.id);
-  const threadTs = cycle.slackRootTs || undefined;
-
-  if (!isCursorConfigured()) {
-    await prisma.cycle.update({ where: { id: cycleId }, data: { status: "failed", resultSummary: "Cursor cloud agent is not configured (CURSOR_API_KEY / CURSOR_AGENT_REPO_URL)." } });
-    await postToGeneral(visibleLog(code, "Waiting", "I approved this change but cannot dispatch it yet: set `CURSOR_API_KEY` and `CURSOR_AGENT_REPO_URL` so I can launch a Cursor cloud agent to implement it."), threadTs);
-    return;
-  }
-
-  const prompt = buildImplementationPrompt(cycle, code);
-  try {
-    const { agent, run } = await createCloudAgent({ prompt, name: `${code}: ${cycle.mission.title}` });
-    await prisma.cycle.update({
-      where: { id: cycleId },
-      data: { status: "waiting_for_agent", cursorAgentId: agent.id, cursorRunId: run.id, cursorAgentUrl: agent.url ?? null },
-    });
-    await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_launched", payload: { cycleId, agentId: agent.id, runId: run.id, url: agent.url ?? null }, relatedCycleId: cycleId } });
-    await postToGeneral(visibleLog(code, "Action", `Launched a Cursor cloud agent to implement ${code}.${agent.url ? `\nAgent: ${agent.url}` : ""}`), threadTs);
-    const mergePlan = autoMergeEnabled()
-      ? "The cloud agent is implementing the change and will open a PR with GitHub auto-merge enabled, so it merges once all required checks pass. I will also watch the PR and merge it through the GitHub API as a fallback."
-      : "The cloud agent is implementing the change and will open a PR. I will watch Cursor for the PR link, then watch and merge the PR through the GitHub API.";
-    await postToGeneral(visibleLog(code, "Waiting", mergePlan), threadTs);
-  } catch (error) {
-    const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
-    await prisma.cycle.update({ where: { id: cycleId }, data: { status: "failed", resultSummary: `Failed to launch Cursor cloud agent: ${detail}` } });
-    await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_launch_failed", payload: { cycleId, detail }, relatedCycleId: cycleId } });
-    await postToGeneral(visibleLog(code, "Result", `I could not launch the Cursor cloud agent for ${code}: ${detail}. Use \`@autoapp start\` to retry once the issue is resolved.`), threadTs);
-  }
-}
-
-export async function autonomouslyApproveAndRequestAgent(cycleId: string): Promise<void> {
-  return approveAndRequestAgent(cycleId, AUTOAPP_ACTOR);
-}
-
-export async function requestQuickChangeAgent(request: string, userId: string, slackMessageTs?: string, threadTs?: string): Promise<
-  | { status: "started"; cycle: Cycle; queueDepth: number }
-  | { status: "queue_full"; cycles: Cycle[]; max: number }
-  | { status: "no_mission" }
+export async function createTask(request: string, userId: string = AUTOAPP_ACTOR, threadTs?: string): Promise<
+  | { status: "started"; task: Task; activeCount: number }
+  | { status: "turned_away"; tasks: Task[]; max: number }
 > {
-  const quickChange = request.trim();
-  if (!quickChange) throw new Error("Quick-change request is required.");
+  const text = request.trim();
+  if (!text) throw new Error("A task request is required.");
 
-  const mission = await prisma.mission.findFirst({ where: { status: "active" }, orderBy: { updatedAt: "desc" } });
-  if (!mission) return { status: "no_mission" };
-
-  const activeCount = await prisma.cycle.count({ where: { status: { in: [...ACTIVE_CYCLE_STATUSES] } } });
-  if (activeCount >= MAX_ACTIVE_CYCLES) {
-    const cycles = await prisma.cycle.findMany({ where: { status: { in: [...ACTIVE_CYCLE_STATUSES] } }, orderBy: { createdAt: "asc" } });
-    return { status: "queue_full", cycles, max: MAX_ACTIVE_CYCLES };
+  const activeCount = await prisma.task.count({ where: { status: { in: [...ACTIVE_TASK_STATUSES] } } });
+  if (activeCount >= MAX_ACTIVE_TASKS) {
+    const tasks = await prisma.task.findMany({ where: { status: { in: [...ACTIVE_TASK_STATUSES] } }, orderBy: { createdAt: "asc" } });
+    return { status: "turned_away", tasks, max: MAX_ACTIVE_TASKS };
   }
 
-  const cycle = await prisma.cycle.create({
+  const task = await prisma.task.create({
     data: {
-      missionId: mission.id,
-      status: "proposed",
-      observation: `Direct Slack quick-change request under the active mission "${mission.title}". This request should not alter the mission text.`,
-      proposal: quickChange,
-      rationale: "A human asked for a focused implementation change in Slack. AutoApp should dispatch it directly without folding it into mission guidance.",
-      riskLevel: "low",
+      status: "queued",
+      request: text,
       acceptanceCriteria: [
-        `Implement the Slack-requested change: ${quickChange}`,
-        "Keep the active mission unchanged",
+        `Implement the requested change: ${text}`,
         "Keep the diff small and focused",
         "Verify the changed behavior before opening or updating the PR",
       ].join("\n"),
@@ -179,33 +121,72 @@ export async function requestQuickChangeAgent(request: string, userId: string, s
       slackRootTs: threadTs,
     },
   });
-  const code = formatCycleCode(cycle.id);
-  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "quick_change_requested", payload: { cycleId: cycle.id, request: quickChange, userId, threadTs }, relatedCycleId: cycle.id } });
-  const message = await postToGeneral(visibleLog(code, "Action", `Treating this as a direct code change without changing the active mission.\nRequest: ${quickChange}`), threadTs);
-  if (!threadTs && message.ts) await prisma.cycle.update({ where: { id: cycle.id }, data: { slackRootTs: message.ts } });
-  await approveAndRequestAgent(cycle.id, userId, slackMessageTs);
-  return { status: "started", cycle, queueDepth: activeCount + 1 };
+  const code = formatTaskCode(task.id);
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "task_created", payload: { taskId: task.id, request: text, userId, threadTs }, relatedTaskId: task.id } });
+  const message = await postToGeneral(visibleLog(code, "Action", `Queued a new task and launching a Cursor cloud agent to implement it.\nRequest: ${text}`), threadTs);
+  if (!threadTs && message.ts) await prisma.task.update({ where: { id: task.id }, data: { slackRootTs: message.ts } });
+  await launchTaskAgent(task.id);
+  return { status: "started", task, activeCount: activeCount + 1 };
 }
 
 /**
- * Poll a cycle's cloud agent run and reconcile cycle state. Returns true when
- * the run reached a terminal state. Safe to call repeatedly (idempotent).
+ * Dispatch a queued task's work to a Cursor cloud agent. Designed to never throw
+ * on Slack/API failures — it records status and posts a human-readable
+ * explanation instead, so the Slack control plane stays usable.
  */
-export async function pollCycleAgent(cycleId: string): Promise<boolean> {
-  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId } });
-  if (!cycle || !cycle.cursorAgentId || !cycle.cursorRunId) return false;
-  if (cycle.status === "completed" || cycle.status === "failed" || cycle.status === "rejected") return true;
+export async function launchTaskAgent(taskId: string): Promise<void> {
+  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  if (!task) throw new Error("No task found to launch.");
+
+  const code = formatTaskCode(task.id);
+  const threadTs = task.slackRootTs || undefined;
+
+  if (!isCursorConfigured()) {
+    await prisma.task.update({ where: { id: taskId }, data: { status: "failed", resultSummary: "Cursor cloud agent is not configured (CURSOR_API_KEY / CURSOR_AGENT_REPO_URL)." } });
+    await postToGeneral(visibleLog(code, "Waiting", "I queued this task but cannot dispatch it yet: set `CURSOR_API_KEY` and `CURSOR_AGENT_REPO_URL` so I can launch a Cursor cloud agent to implement it."), threadTs);
+    return;
+  }
+
+  const prompt = buildImplementationPrompt(task, code);
+  try {
+    const { agent, run } = await createCloudAgent({ prompt, name: `${code}: ${task.request.slice(0, 80)}` });
+    await prisma.task.update({
+      where: { id: taskId },
+      data: { status: "waiting_for_agent", cursorAgentId: agent.id, cursorRunId: run.id, cursorAgentUrl: agent.url ?? null },
+    });
+    await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_launched", payload: { taskId, agentId: agent.id, runId: run.id, url: agent.url ?? null }, relatedTaskId: taskId } });
+    await postToGeneral(visibleLog(code, "Action", `Launched a Cursor cloud agent to implement ${code}.${agent.url ? `\nAgent: ${agent.url}` : ""}`), threadTs);
+    const mergePlan = autoMergeEnabled()
+      ? "The cloud agent is implementing the change and will open a PR with GitHub auto-merge enabled, so it merges once all required checks pass. I will also watch the PR and merge it through the GitHub API as a fallback."
+      : "The cloud agent is implementing the change and will open a PR. I will watch Cursor for the PR link, then watch and merge the PR through the GitHub API.";
+    await postToGeneral(visibleLog(code, "Waiting", mergePlan), threadTs);
+  } catch (error) {
+    const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
+    await prisma.task.update({ where: { id: taskId }, data: { status: "failed", resultSummary: `Failed to launch Cursor cloud agent: ${detail}` } });
+    await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_launch_failed", payload: { taskId, detail }, relatedTaskId: taskId } });
+    await postToGeneral(visibleLog(code, "Result", `I could not launch the Cursor cloud agent for ${code}: ${detail}. Ask again once the issue is resolved.`), threadTs);
+  }
+}
+
+/**
+ * Poll a task's cloud agent run and reconcile task state. Returns true when the
+ * run reached a terminal state. Safe to call repeatedly (idempotent).
+ */
+export async function pollTaskAgent(taskId: string): Promise<boolean> {
+  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  if (!task || !task.cursorAgentId || !task.cursorRunId) return false;
+  if (task.status === "completed" || task.status === "failed" || task.status === "cancelled") return true;
   if (!isCursorConfigured()) return false;
 
-  const code = formatCycleCode(cycle.id);
-  const threadTs = cycle.slackRootTs || undefined;
+  const code = formatTaskCode(task.id);
+  const threadTs = task.slackRootTs || undefined;
   let run;
   try {
-    run = await getRun(cycle.cursorAgentId, cycle.cursorRunId);
+    run = await getRun(task.cursorAgentId, task.cursorRunId);
   } catch (error) {
     if (error instanceof CursorApiError && error.status === 404) {
-      await prisma.cycle.update({ where: { id: cycleId }, data: { status: "failed", resultSummary: "Cursor cloud agent run was not found." } });
-      await postToGeneral(visibleLog(code, "Result", "The Cursor cloud agent run is no longer available. Start a new cycle with `@autoapp start`."), threadTs);
+      await prisma.task.update({ where: { id: taskId }, data: { status: "failed", resultSummary: "Cursor cloud agent run was not found." } });
+      await postToGeneral(visibleLog(code, "Result", "The Cursor cloud agent run is no longer available. Ask AutoApp to start the task again."), threadTs);
       return true;
     }
     return false;
@@ -215,7 +196,7 @@ export async function pollCycleAgent(cycleId: string): Promise<boolean> {
   let headBranch = extractHeadBranch(run);
   if (!prUrl) {
     try {
-      const agent = await getAgent(cycle.cursorAgentId);
+      const agent = await getAgent(task.cursorAgentId);
       prUrl = extractPrUrl(agent);
       headBranch ||= extractHeadBranch(agent);
     } catch {
@@ -223,10 +204,10 @@ export async function pollCycleAgent(cycleId: string): Promise<boolean> {
     }
   }
 
-  const data: Prisma.CycleUpdateInput = {};
-  if (prUrl && prUrl !== cycle.githubPrUrl) {
+  const data: Prisma.TaskUpdateInput = {};
+  if (prUrl && prUrl !== task.githubPrUrl) {
     data.githubPrUrl = prUrl;
-    if (cycle.status === "waiting_for_agent") data.status = "pr_opened";
+    if (task.status === "waiting_for_agent") data.status = "pr_opened";
     await postToGeneral(visibleLog(code, "Result", `The Cursor cloud agent opened a pull request: ${prUrl}`), threadTs);
   }
 
@@ -242,115 +223,115 @@ export async function pollCycleAgent(cycleId: string): Promise<boolean> {
     await postToGeneral(visibleLog(code, "Result", "The Cursor cloud agent finished implementing the change. Watching GitHub PR checks and merge state now."), threadTs);
   }
 
-  if (Object.keys(data).length) await prisma.cycle.update({ where: { id: cycleId }, data });
-  await prisma.integrationEvent.create({ data: { source: "cursor", eventType: `run_${run.status.toLowerCase()}`, payload: { cycleId, runId: run.id, prUrl: prUrl ?? null }, relatedCycleId: cycleId } });
+  if (Object.keys(data).length) await prisma.task.update({ where: { id: taskId }, data });
+  await prisma.integrationEvent.create({ data: { source: "cursor", eventType: `run_${run.status.toLowerCase()}`, payload: { taskId, runId: run.id, prUrl: prUrl ?? null }, relatedTaskId: taskId } });
 
-  if (prUrl || headBranch || cycle.githubPrUrl) await reconcileCyclePullRequest(cycleId, { prUrl, headBranch });
+  if (prUrl || headBranch || task.githubPrUrl) await reconcileTaskPullRequest(taskId, { prUrl, headBranch });
   return isTerminalRunStatus(run.status);
 }
 
-/** Poll every cycle that has an in-flight cloud agent. */
+/** Poll every task that has an in-flight cloud agent. */
 export async function pollActiveAgents(): Promise<number> {
-  const cycles = await prisma.cycle.findMany({
+  const tasks = await prisma.task.findMany({
     where: {
       cursorAgentId: { not: null },
       status: { in: [...ACTIVE_PR_STATUSES] },
     },
     select: { id: true },
   });
-  for (const cycle of cycles) await pollCycleAgent(cycle.id);
-  return cycles.length;
+  for (const task of tasks) await pollTaskAgent(task.id);
+  return tasks.length;
 }
 
-/** Poll every active cycle with a PR or discoverable Cursor branch through GitHub. */
+/** Poll every active task with a PR or discoverable Cursor branch through GitHub. */
 export async function pollActivePullRequests(): Promise<number> {
-  const cycles = await prisma.cycle.findMany({
+  const tasks = await prisma.task.findMany({
     where: {
       status: { in: [...ACTIVE_PR_STATUSES] },
       OR: [{ githubPrUrl: { not: null } }, { cursorAgentId: { not: null } }],
     },
     select: { id: true },
   });
-  for (const cycle of cycles) await reconcileCyclePullRequest(cycle.id);
-  return cycles.length;
+  for (const task of tasks) await reconcileTaskPullRequest(task.id);
+  return tasks.length;
 }
 
-export async function requestAutonomousMergeIfReady(cycleId: string): Promise<boolean> {
-  return reconcileCyclePullRequest(cycleId);
+export async function requestAutonomousMergeIfReady(taskId: string): Promise<boolean> {
+  return reconcileTaskPullRequest(taskId);
 }
 
 /**
- * Statuses a cycle could be parked in after its PR merged but before this build
+ * Statuses a task could be parked in after its PR merged but before this build
  * closed the loop directly on merge. A merged change on `main` is AutoApp's
- * success condition, so any cycle still sitting here is finished and should be
- * completed — without waiting for a Vercel production-deploy Slack notification.
+ * success condition, so any task still sitting here is finished and should be
+ * completed — without waiting for a Vercel production-deploy notification.
  */
 const POST_MERGE_PENDING_STATUSES = ["waiting_for_production_deploy", "production_deployed"] as const;
 
 /**
- * Complete any cycle whose PR already merged but that is lingering in a
+ * Complete any task whose PR already merged but that is lingering in a
  * post-merge "waiting for the production deployment" state. Closing the loop on
- * merge is the primary path; this sweep recovers cycles that entered the wait
- * state before this behavior change (or via a Slack-driven status update), so
- * the loop never gets permanently stuck once the code is live on main.
+ * merge is the primary path; this sweep recovers tasks that entered the wait
+ * state via a Slack-driven status update, so the loop never gets permanently
+ * stuck once the code is live on main.
  */
-export async function completeMergedCycles(): Promise<number> {
-  const cycles = await prisma.cycle.findMany({
+export async function completeMergedTasks(): Promise<number> {
+  const tasks = await prisma.task.findMany({
     where: { status: { in: [...POST_MERGE_PENDING_STATUSES] } },
     select: { id: true, githubPrUrl: true },
   });
-  for (const cycle of cycles) {
-    const prRef = cycle.githubPrUrl ? `Pull request ${cycle.githubPrUrl}` : "The pull request";
-    await completeCycle(cycle.id, `${prRef} is merged into main, so the change is live on the default branch. Marking this cycle successful.`);
+  for (const task of tasks) {
+    const prRef = task.githubPrUrl ? `Pull request ${task.githubPrUrl}` : "The pull request";
+    await completeTask(task.id, `${prRef} is merged into main, so the change is live on the default branch. Marking this task successful.`);
   }
-  return cycles.length;
+  return tasks.length;
 }
 
 /**
- * Best-effort, non-blocking advance of every in-flight cycle: poll Cursor runs
+ * Best-effort, non-blocking advance of every in-flight task: poll Cursor runs
  * for newly opened PRs, then reconcile/merge open PRs through GitHub. This is
- * the same work the `/api/cron/observe` scheduler does, exposed so any Slack
- * interaction can also nudge the OODA loop forward. That keeps a launched agent
- * from getting stuck in `waiting_for_agent` (with its PR never discovered or
- * merged) when the scheduled cron is delayed or not configured. Never throws.
+ * the same work the `/api/cron/poll` scheduler does, exposed so any Slack
+ * interaction can also nudge the loop forward. That keeps a launched agent from
+ * getting stuck in `waiting_for_agent` (with its PR never discovered or merged)
+ * when the scheduled cron is delayed or not configured. Never throws.
  */
-export async function nudgeActiveCycles(): Promise<{ polledAgents: number; polledPullRequests: number; completedMerged: number }> {
+export async function nudgeActiveTasks(): Promise<{ polledAgents: number; polledPullRequests: number; completedMerged: number }> {
   try {
     const polledAgents = await pollActiveAgents();
     const polledPullRequests = await pollActivePullRequests();
-    const completedMerged = await completeMergedCycles();
+    const completedMerged = await completeMergedTasks();
     return { polledAgents, polledPullRequests, completedMerged };
   } catch (error) {
-    console.error("[AutoApp] Failed to advance active cycles:", error instanceof Error ? error.message : error);
+    console.error("[AutoApp] Failed to advance active tasks:", error instanceof Error ? error.message : error);
     return { polledAgents: 0, polledPullRequests: 0, completedMerged: 0 };
   }
 }
 
-export async function reconcileCyclePullRequest(cycleId: string, options: { prUrl?: string; headBranch?: string } = {}): Promise<boolean> {
-  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId }, include: { decisions: true } });
-  if (!cycle || cycle.status === "completed" || cycle.status === "failed" || cycle.status === "rejected") return false;
-  const code = formatCycleCode(cycle.id);
-  const threadTs = cycle.slackRootTs || undefined;
+export async function reconcileTaskPullRequest(taskId: string, options: { prUrl?: string; headBranch?: string } = {}): Promise<boolean> {
+  const task = await prisma.task.findUnique({ where: { id: taskId }, include: { decisions: true } });
+  if (!task || task.status === "completed" || task.status === "failed" || task.status === "cancelled") return false;
+  const code = formatTaskCode(task.id);
+  const threadTs = task.slackRootTs || undefined;
 
   if (!isGitHubConfigured()) {
-    await postOnce(cycleId, "github_not_configured", code, "Waiting", "I found PR work to watch, but GitHub API access is not configured. Set `GITHUB_TOKEN` plus `GITHUB_REPOSITORY` (or keep `CURSOR_AGENT_REPO_URL`) so I can watch and merge PRs directly.", threadTs);
+    await postOnce(taskId, "github_not_configured", code, "Waiting", "I found PR work to watch, but GitHub API access is not configured. Set `GITHUB_TOKEN` plus `GITHUB_REPOSITORY` (or keep `CURSOR_AGENT_REPO_URL`) so I can watch and merge PRs directly.", threadTs);
     return false;
   }
 
   let pr: GitHubPullRequest | undefined;
   try {
-    pr = await findCyclePullRequest(cycle, options);
+    pr = await findTaskPullRequest(task, options);
   } catch (error) {
     const detail = error instanceof GitHubApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
-    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_watch_failed", payload: { cycleId, detail }, relatedCycleId: cycleId } });
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_watch_failed", payload: { taskId, detail }, relatedTaskId: taskId } });
     return false;
   }
   if (!pr) return false;
 
-  const data: Prisma.CycleUpdateInput = {};
-  if (pr.html_url !== cycle.githubPrUrl) {
+  const data: Prisma.TaskUpdateInput = {};
+  if (pr.html_url !== task.githubPrUrl) {
     data.githubPrUrl = pr.html_url;
-    if (cycle.status === "waiting_for_agent") data.status = "pr_opened";
+    if (task.status === "waiting_for_agent") data.status = "pr_opened";
     await postToGeneral(visibleLog(code, "Result", `Found the pull request through GitHub: ${pr.html_url}`), threadTs);
   }
 
@@ -359,25 +340,25 @@ export async function reconcileCyclePullRequest(cycleId: string, options: { prUr
     if (pr.state === "open") checks = await getPullRequestChecks(pr.head.sha);
   } catch (error) {
     const detail = error instanceof GitHubApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
-    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_checks_failed_to_load", payload: { cycleId, prUrl: pr.html_url, detail }, relatedCycleId: cycleId } });
-    await postOnce(cycleId, "github_pr_checks_failed_to_load_notice", code, "Waiting", `I found ${pr.html_url}, but GitHub check status could not be loaded: ${detail}. I will keep polling.`, threadTs);
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_checks_failed_to_load", payload: { taskId, prUrl: pr.html_url, detail }, relatedTaskId: taskId } });
+    await postOnce(taskId, "github_pr_checks_failed_to_load_notice", code, "Waiting", `I found ${pr.html_url}, but GitHub check status could not be loaded: ${detail}. I will keep polling.`, threadTs);
     return false;
   }
-  await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_state_polled", payload: { cycleId, prUrl: pr.html_url, state: pr.state, merged: pr.merged ?? false, draft: pr.draft, mergeable: pr.mergeable, mergeableState: pr.mergeable_state, checks: checks ?? null }, relatedCycleId: cycleId } });
+  await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_state_polled", payload: { taskId, prUrl: pr.html_url, state: pr.state, merged: pr.merged ?? false, draft: pr.draft, mergeable: pr.mergeable, mergeableState: pr.mergeable_state, checks: checks ?? null }, relatedTaskId: taskId } });
 
   if (pr.state === "closed") {
     if (pr.merged) {
       // A merged PR on the default branch is AutoApp's success condition. The
       // change is live on main, so we close the loop here instead of blocking
       // on a separate Vercel production-deploy signal that may never arrive.
-      await updateCycleIfNeeded(cycleId, data);
-      await postOnce(cycleId, "github_pr_merged_detected", code, "Result", `GitHub reports ${pr.html_url} is merged into main.`, threadTs);
-      await completeCycle(cycleId, `Pull request ${pr.html_url} is merged into main, so the change is live on the default branch. Marking this cycle successful.`);
+      await updateTaskIfNeeded(taskId, data);
+      await postOnce(taskId, "github_pr_merged_detected", code, "Result", `GitHub reports ${pr.html_url} is merged into main.`, threadTs);
+      await completeTask(taskId, `Pull request ${pr.html_url} is merged into main, so the change is live on the default branch. Marking this task successful.`);
     } else {
       data.status = "failed";
       data.resultSummary = `Pull request ${pr.html_url} was closed without being merged.`;
-      await postOnce(cycleId, "github_pr_closed_unmerged", code, "Result", `GitHub reports ${pr.html_url} was closed without being merged. This cycle is stopped.`, threadTs);
-      await updateCycleIfNeeded(cycleId, data);
+      await postOnce(taskId, "github_pr_closed_unmerged", code, "Result", `GitHub reports ${pr.html_url} was closed without being merged. This task is stopped.`, threadTs);
+      await updateTaskIfNeeded(taskId, data);
     }
     return true;
   }
@@ -385,37 +366,37 @@ export async function reconcileCyclePullRequest(cycleId: string, options: { prUr
   const readiness = getReadiness(pr, checks);
   if (readiness.status) data.status = readiness.status;
   if (readiness.resultSummary) data.resultSummary = readiness.resultSummary;
-  await updateCycleIfNeeded(cycleId, data);
+  await updateTaskIfNeeded(taskId, data);
 
   if (!readiness.readyToMerge) {
-    if (readiness.waitingMessage) await postOnce(cycleId, readiness.eventType, code, "Waiting", readiness.waitingMessage, threadTs);
+    if (readiness.waitingMessage) await postOnce(taskId, readiness.eventType, code, "Waiting", readiness.waitingMessage, threadTs);
     return true;
   }
 
-  const alreadyRecommended = cycle.decisions.some((decision) => decision.decision === "merge_recommended");
+  const alreadyRecommended = task.decisions.some((decision) => decision.decision === "merge_recommended");
   if (!alreadyRecommended) {
     await prisma.decision.create({
       data: {
-        cycleId,
+        taskId,
         decision: "merge_recommended",
         decidedBySlackUserId: AUTOAPP_ACTOR,
-        rationale: "AutoApp saw a mergeable PR with passing GitHub checks and is authorized to merge safe core changes without human approval.",
+        rationale: "AutoApp saw a mergeable PR with passing GitHub checks and is authorized to merge safe changes without human approval.",
       },
     });
   }
 
   try {
     const result = await mergePullRequest(pr);
-    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_merged_by_autoapp", payload: { cycleId, prUrl: pr.html_url, sha: result.sha, message: result.message }, relatedCycleId: cycleId } });
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_merged_by_autoapp", payload: { taskId, prUrl: pr.html_url, sha: result.sha, message: result.message }, relatedTaskId: taskId } });
     await postToGeneral(visibleLog(code, "Action", `Merged ${pr.html_url} through the GitHub API at ${result.sha}.`), threadTs);
     // The merge landed on main, so the change is live on the default branch.
     // Close the loop now rather than waiting for a production-deploy signal.
-    await completeCycle(cycleId, `Merged ${pr.html_url} into main via the GitHub API at ${result.sha}. The change is on the default branch, so this cycle is successful.`);
+    await completeTask(taskId, `Merged ${pr.html_url} into main via the GitHub API at ${result.sha}. The change is on the default branch, so this task is successful.`);
   } catch (error) {
     const detail = error instanceof GitHubApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
-    await prisma.cycle.update({ where: { id: cycleId }, data: { status: "waiting_for_merge", resultSummary: `GitHub merge attempt failed: ${detail}` } });
-    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_merge_failed", payload: { cycleId, prUrl: pr.html_url, detail }, relatedCycleId: cycleId } });
-    await postOnce(cycleId, "github_pr_merge_failed_notice", code, "Waiting", `GitHub says ${pr.html_url} is ready, but the merge API call failed: ${detail}. I will keep watching the PR for a retryable state.`, threadTs);
+    await prisma.task.update({ where: { id: taskId }, data: { status: "waiting_for_merge", resultSummary: `GitHub merge attempt failed: ${detail}` } });
+    await prisma.integrationEvent.create({ data: { source: "github", eventType: "pr_merge_failed", payload: { taskId, prUrl: pr.html_url, detail }, relatedTaskId: taskId } });
+    await postOnce(taskId, "github_pr_merge_failed_notice", code, "Waiting", `GitHub says ${pr.html_url} is ready, but the merge API call failed: ${detail}. I will keep watching the PR for a retryable state.`, threadTs);
   }
   return true;
 }
@@ -425,8 +406,8 @@ function extractHeadBranch(source: { git?: { branches?: Array<{ branch?: string;
   return branches.find((branch) => branch.prUrl && branch.branch)?.branch || branches.find((branch) => branch.branch)?.branch;
 }
 
-async function findCyclePullRequest(cycle: Cycle, options: { prUrl?: string; headBranch?: string }): Promise<GitHubPullRequest | undefined> {
-  for (const prUrl of [options.prUrl, cycle.githubPrUrl].filter(Boolean) as string[]) {
+async function findTaskPullRequest(task: Task, options: { prUrl?: string; headBranch?: string }): Promise<GitHubPullRequest | undefined> {
+  for (const prUrl of [options.prUrl, task.githubPrUrl].filter(Boolean) as string[]) {
     if (!parsePullRequestUrl(prUrl)) continue;
     try {
       return await getPullRequest(prUrl);
@@ -443,13 +424,13 @@ async function findCyclePullRequest(cycle: Cycle, options: { prUrl?: string; hea
     if (pr) return pr;
   }
 
-  const code = formatCycleCode(cycle.id).toLowerCase();
+  const code = formatTaskCode(task.id).toLowerCase();
   const recentOpenPrs = await listPullRequests({ state: "open", perPage: 20 });
   const codeMatch = recentOpenPrs.find((pr) => [pr.title, pr.body || "", pr.head.ref].some((value) => value.toLowerCase().includes(code)));
   if (codeMatch) return codeMatch;
 
   const authorLogin = process.env.GITHUB_CURSOR_AUTHOR_LOGIN?.trim();
-  const createdAfter = cycle.createdAt.getTime() - 5 * 60 * 1000;
+  const createdAfter = task.createdAt.getTime() - 5 * 60 * 1000;
   const recentCandidates = recentOpenPrs.filter((pr) => {
     if (new Date(pr.created_at).getTime() < createdAfter) return false;
     return !authorLogin || pr.user?.login === authorLogin;
@@ -486,7 +467,7 @@ function getReadiness(pr: GitHubPullRequest, checks: PullRequestChecks | undefin
 
   if (checks.state === "failure") {
     const failing = checks.failing.join(", ") || "unknown failing check";
-    return { readyToMerge: false, status: "failed", resultSummary: `GitHub checks failed for ${pr.html_url}: ${failing}.`, eventType: "github_pr_checks_failed", waitingMessage: `GitHub checks failed for ${pr.html_url}: ${failing}. This cycle is stopped.` };
+    return { readyToMerge: false, status: "failed", resultSummary: `GitHub checks failed for ${pr.html_url}: ${failing}.`, eventType: "github_pr_checks_failed", waitingMessage: `GitHub checks failed for ${pr.html_url}: ${failing}. This task is stopped.` };
   }
 
   if (checks.state === "pending") {
@@ -504,98 +485,92 @@ function getReadiness(pr: GitHubPullRequest, checks: PullRequestChecks | undefin
   return { readyToMerge: true, status: "waiting_for_merge", eventType: "github_pr_ready_to_merge" };
 }
 
-async function updateCycleIfNeeded(cycleId: string, data: Prisma.CycleUpdateInput): Promise<void> {
-  if (Object.keys(data).length) await prisma.cycle.update({ where: { id: cycleId }, data });
+async function updateTaskIfNeeded(taskId: string, data: Prisma.TaskUpdateInput): Promise<void> {
+  if (Object.keys(data).length) await prisma.task.update({ where: { id: taskId }, data });
 }
 
-async function postOnce(cycleId: string, eventType: string, code: string, label: string, body: string, threadTs?: string): Promise<void> {
-  const existing = await prisma.integrationEvent.findFirst({ where: { relatedCycleId: cycleId, eventType } });
+async function postOnce(taskId: string, eventType: string, code: string, label: string, body: string, threadTs?: string): Promise<void> {
+  const existing = await prisma.integrationEvent.findFirst({ where: { relatedTaskId: taskId, eventType } });
   if (existing) return;
-  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType, payload: { cycleId, body }, relatedCycleId: cycleId } });
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType, payload: { taskId, body }, relatedTaskId: taskId } });
   await postToGeneral(visibleLog(code, label, body), threadTs);
 }
 
-export async function completeCycle(cycleId: string, resultSummary: string) {
-  const cycle = await prisma.cycle.update({ where: { id: cycleId }, data: { status: "completed", resultSummary }, include: { mission: true } });
-  const code = formatCycleCode(cycle.id);
-  await postToGeneral(visibleLog(code, "Result", `${resultSummary}\nMission remains active: ${cycle.mission.title}\nNext step: I can start another OODA cycle when asked or when the observe cron runs.`), cycle.slackRootTs || undefined);
-  return cycle;
-}
-
-export async function rejectCycle(cycleId: string, userId: string, slackMessageTs?: string) {
-  await prisma.decision.create({ data: { cycleId, decision: "rejected", decidedBySlackUserId: userId, slackMessageTs, rationale: "Human rejected the proposed AutoApp cycle in Slack." } });
-  return prisma.cycle.update({ where: { id: cycleId }, data: { status: "rejected", resultSummary: "Rejected by human in Slack before cloud agent execution." } });
+export async function completeTask(taskId: string, resultSummary: string) {
+  const task = await prisma.task.update({ where: { id: taskId }, data: { status: "completed", resultSummary } });
+  const code = formatTaskCode(task.id);
+  await postToGeneral(visibleLog(code, "Result", `${resultSummary}\nNext step: ask AutoApp for another change in Slack whenever you're ready.`), task.slackRootTs || undefined);
+  return task;
 }
 
 /**
- * Cancel a single queued/in-flight cycle without touching the mission or the
- * other queued tasks. Marks the cycle rejected, records the decision, and makes
- * a best-effort attempt to stop the backing Cursor cloud agent so we stop
- * paying for work that was discarded.
+ * Cancel a single queued/in-flight task. Marks the task cancelled, records the
+ * decision, and makes a best-effort attempt to stop the backing Cursor cloud
+ * agent so we stop paying for work that was discarded.
  */
-export async function cancelCycle(cycleId: string, userId: string = AUTOAPP_ACTOR, slackMessageTs?: string): Promise<{ cycle: Cycle; agentStopped: boolean }> {
-  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId } });
-  if (!cycle) throw new Error("No cycle found to cancel.");
-  const code = formatCycleCode(cycle.id);
-  const threadTs = cycle.slackRootTs || undefined;
+export async function cancelTask(taskId: string, userId: string = AUTOAPP_ACTOR, slackMessageTs?: string): Promise<{ task: Task; agentStopped: boolean }> {
+  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  if (!task) throw new Error("No task found to cancel.");
+  const code = formatTaskCode(task.id);
+  const threadTs = task.slackRootTs || undefined;
 
   let agentStopped = false;
-  if (cycle.cursorAgentId && isCursorConfigured()) {
+  if (task.cursorAgentId && isCursorConfigured()) {
     try {
-      await deleteAgent(cycle.cursorAgentId);
+      await deleteAgent(task.cursorAgentId);
       agentStopped = true;
     } catch (error) {
       const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
-      await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_cancel_failed", payload: { cycleId, detail }, relatedCycleId: cycleId } });
+      await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_cancel_failed", payload: { taskId, detail }, relatedTaskId: taskId } });
     }
   }
 
-  await prisma.decision.create({ data: { cycleId, decision: "rejected", decidedBySlackUserId: userId, slackMessageTs, rationale: "Human cancelled this queued AutoApp task from Slack." } });
-  const updated = await prisma.cycle.update({ where: { id: cycleId }, data: { status: "rejected", resultSummary: `Cancelled from Slack${agentStopped ? " (Cursor cloud agent stopped)" : ""}.` } });
-  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "cycle_cancelled", payload: { cycleId, userId, agentStopped }, relatedCycleId: cycleId } });
-  await postToGeneral(visibleLog(code, "Action", `Cancelled this queued task at your request.${agentStopped ? " I asked Cursor to stop the cloud agent." : ""}`), threadTs);
-  return { cycle: updated, agentStopped };
+  await prisma.decision.create({ data: { taskId, decision: "cancelled", decidedBySlackUserId: userId, slackMessageTs, rationale: "Cancelled from Slack." } });
+  const updated = await prisma.task.update({ where: { id: taskId }, data: { status: "cancelled", resultSummary: `Cancelled from Slack${agentStopped ? " (Cursor cloud agent stopped)" : ""}.` } });
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "task_cancelled", payload: { taskId, userId, agentStopped }, relatedTaskId: taskId } });
+  await postToGeneral(visibleLog(code, "Action", `Cancelled this task at your request.${agentStopped ? " I asked Cursor to stop the cloud agent." : ""}`), threadTs);
+  return { task: updated, agentStopped };
 }
 
 /**
- * Push updated instructions into an existing queued task. If the cycle has not
- * launched yet (`proposed`) we just rewrite its proposal/acceptance so the
- * pending launch uses the new text. If it already has a Cursor cloud agent, we
- * send a follow-up run so the live agent incorporates the guidance.
+ * Push updated instructions into an existing task. If the task has not launched
+ * yet (`queued`) we rewrite its request/acceptance so the pending launch uses
+ * the new text. If it already has a Cursor cloud agent, we send a follow-up run
+ * so the live agent incorporates the guidance.
  */
-export async function addGuidanceToCycle(cycleId: string, guidance: string, userId: string = AUTOAPP_ACTOR): Promise<{ cycle: Cycle; mode: "rewrote_proposal" | "followup_run" | "recorded" }> {
+export async function addGuidanceToTask(taskId: string, guidance: string, userId: string = AUTOAPP_ACTOR): Promise<{ task: Task; mode: "rewrote_request" | "followup_run" | "recorded" }> {
   const text = guidance.trim();
   if (!text) throw new Error("Updated instructions are required.");
-  const cycle = await prisma.cycle.findUnique({ where: { id: cycleId } });
-  if (!cycle) throw new Error("No cycle found to update.");
-  const code = formatCycleCode(cycle.id);
-  const threadTs = cycle.slackRootTs || undefined;
+  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  if (!task) throw new Error("No task found to update.");
+  const code = formatTaskCode(task.id);
+  const threadTs = task.slackRootTs || undefined;
 
-  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "cycle_update_requested", payload: { cycleId, guidance: text, userId }, relatedCycleId: cycleId } });
+  await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "task_update_requested", payload: { taskId, guidance: text, userId }, relatedTaskId: taskId } });
 
-  if (cycle.status === "proposed") {
-    const updated = await prisma.cycle.update({
-      where: { id: cycleId },
+  if (task.status === "queued") {
+    const updated = await prisma.task.update({
+      where: { id: taskId },
       data: {
-        proposal: text,
+        request: text,
         acceptanceCriteria: [`Implement the updated request: ${text}`, "Keep the diff small and focused", "Verify the changed behavior before opening or updating the PR"].join("\n"),
       },
     });
     await postToGeneral(visibleLog(code, "Action", `Updated this task before launch.\nNew request: ${text}`), threadTs);
-    return { cycle: updated, mode: "rewrote_proposal" };
+    return { task: updated, mode: "rewrote_request" };
   }
 
-  if (cycle.cursorAgentId && isCursorConfigured()) {
+  if (task.cursorAgentId && isCursorConfigured()) {
     try {
-      await createFollowupRun(cycle.cursorAgentId, `Updated instructions for ${code}: ${text}\n\nPlease incorporate this into the work in progress and update the pull request accordingly.`);
+      await createFollowupRun(task.cursorAgentId, `Updated instructions for ${code}: ${text}\n\nPlease incorporate this into the work in progress and update the pull request accordingly.`);
       await postToGeneral(visibleLog(code, "Action", `Sent your updated instructions to the running Cursor cloud agent.\nNew guidance: ${text}`), threadTs);
-      return { cycle, mode: "followup_run" };
+      return { task, mode: "followup_run" };
     } catch (error) {
       const detail = error instanceof CursorApiError ? `${error.message} (${error.body})` : error instanceof Error ? error.message : "unknown error";
-      await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "cycle_followup_failed", payload: { cycleId, detail }, relatedCycleId: cycleId } });
+      await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "task_followup_failed", payload: { taskId, detail }, relatedTaskId: taskId } });
     }
   }
 
   await postToGeneral(visibleLog(code, "Waiting", `Recorded your updated guidance for this task: ${text}`), threadTs);
-  return { cycle, mode: "recorded" };
+  return { task, mode: "recorded" };
 }
