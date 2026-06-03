@@ -1,3 +1,20 @@
+-- Production-safety preamble.
+--
+-- This migration removes Missions/Cycles/Evaluation and reshapes the data model
+-- around Tasks. The original auto-generated version assumed empty tables and
+-- failed on databases that already had data because:
+--   * Decision rows used DecisionType values that are being removed
+--     (approved/rejected/paused/resumed/rollback_requested), so the enum cast
+--     below aborted, and a NOT NULL `taskId` column cannot be added to a table
+--     that still has rows.
+--   * SlackMemory rows could carry the removed `mission_update` classification.
+--
+-- Decisions were entirely Cycle-scoped (Cycles are being dropped), so they are
+-- safe to clear here. SlackMemory rows are kept; the removed classification is
+-- remapped to `human_instruction`.
+DELETE FROM "Decision";
+UPDATE "SlackMemory" SET "classification" = 'human_instruction' WHERE "classification" = 'mission_update';
+
 -- CreateEnum
 CREATE TYPE "TaskStatus" AS ENUM ('queued', 'waiting_for_agent', 'pr_opened', 'waiting_for_checks', 'waiting_for_preview_deploy', 'preview_deployed', 'waiting_for_merge', 'waiting_for_production_deploy', 'production_deployed', 'completed', 'failed', 'cancelled');
 
@@ -97,4 +114,3 @@ ALTER TABLE "Decision" ADD CONSTRAINT "Decision_taskId_fkey" FOREIGN KEY ("taskI
 
 -- AddForeignKey
 ALTER TABLE "IntegrationEvent" ADD CONSTRAINT "IntegrationEvent_relatedTaskId_fkey" FOREIGN KEY ("relatedTaskId") REFERENCES "Task"("id") ON DELETE SET NULL ON UPDATE CASCADE;
-
