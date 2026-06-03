@@ -4,7 +4,11 @@ import { prisma } from "@/lib/db";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
 const payloadSchema = z.object({
-  email: z.string().trim().toLowerCase().email("Please enter a valid email address."),
+  email: z
+    .string({ required_error: "Please enter your email address." })
+    .trim()
+    .toLowerCase()
+    .email("Please enter a valid email address."),
   source: z.string().trim().max(120).optional(),
 });
 
