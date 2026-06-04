@@ -27,6 +27,7 @@ import {
   type PullRequestChecks,
 } from "@/lib/github/client";
 import { MAX_ACTIVE_TASKS } from "./task";
+import { getMission } from "./mission";
 import { ACTIVE_TASK_STATUSES, DEFAULT_DOS, DEFAULT_FORBIDDEN_AREAS, formatTaskCode, visibleLog } from "./policies";
 
 const AUTOAPP_ACTOR = "autoapp";
@@ -56,11 +57,12 @@ export function autoMergeInstruction(): string {
 }
 
 /**
- * Build the prompt sent to the Cursor cloud agent for a task. It is intentionally
- * focused: the task request plus do/don't guardrails and acceptance criteria —
- * no mission framing and no web-app evaluation noise.
+ * Build the prompt sent to the Cursor cloud agent for a task: the task request
+ * plus do/don't guardrails and acceptance criteria. When an overarching durable
+ * mission is set, it is included up front so the agent advances the specific
+ * task in service of that standing objective.
  */
-function buildImplementationPrompt(task: Task, code: string): string {
+function buildImplementationPrompt(task: Task, code: string, mission?: string | null): string {
   const donts = task.forbiddenAreas
     .split("\n")
     .map((item) => item.trim())
@@ -74,9 +76,16 @@ function buildImplementationPrompt(task: Task, code: string): string {
     .filter(Boolean)
     .map((item) => `* ${item}`)
     .join("\n");
+  const missionText = mission?.trim();
+  const missionSection = missionText
+    ? `Mission (AutoApp's overarching, durable objective — keep this in mind for every change):
+${missionText}
+
+`
+    : "";
   return `You are AutoApp's implementation worker for task ${code}.
 
-Task:
+${missionSection}Task:
 ${task.request}
 
 Do:
@@ -152,7 +161,8 @@ export async function launchTaskAgent(taskId: string): Promise<void> {
     return;
   }
 
-  const prompt = buildImplementationPrompt(task, code);
+  const mission = await getMission();
+  const prompt = buildImplementationPrompt(task, code, mission);
   try {
     const { agent, run } = await createCloudAgent({ prompt, name: `${code}: ${task.request.slice(0, 80)}` });
     await prisma.task.update({

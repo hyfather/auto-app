@@ -6,6 +6,7 @@ import {
   createTask,
 } from "@/lib/autoapp/execute";
 import { findActiveTaskByReference, getActiveTasks, MAX_ACTIVE_TASKS } from "@/lib/autoapp/task";
+import { clearMission, getMission, setMission } from "@/lib/autoapp/mission";
 import { summarizeLatestTask } from "@/lib/autoapp/summarize";
 import { formatTaskCode } from "@/lib/autoapp/policies";
 import { summarizeLastDeployment, summarizePullRequests, type PullRequestState } from "@/lib/github/overview";
@@ -226,6 +227,35 @@ export const TOOLS: ToolDef[] = [
     description: "Summarize the most recent task: its status, request, PR, and related Slack updates.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => summarizeLatestTask(),
+  },
+  {
+    name: "set_mission",
+    description:
+      "Set, update, or clear AutoApp's overarching durable mission — a standing objective folded into the prompt of every new Cursor cloud agent task alongside the specific request. Use when the user sets/changes/clears the mission (e.g. `mission keep the app fast and accessible`). Pass an empty mission to clear it.",
+    parameters: {
+      type: "object",
+      properties: { mission: { type: "string", description: "The overarching mission text. Pass an empty string to clear the mission." } },
+      required: ["mission"],
+      additionalProperties: false,
+    },
+    execute: async (args, ctx) => {
+      const mission = str(args.mission);
+      if (!mission) {
+        await clearMission(ctx.userId);
+        return "Cleared AutoApp's mission. New tasks will no longer carry mission context.";
+      }
+      await setMission(mission, ctx.userId);
+      return `Set AutoApp's mission. Every new task will include it alongside the specific request:\n> ${mission}`;
+    },
+  },
+  {
+    name: "get_mission",
+    description: "Show AutoApp's current overarching durable mission, if one is set.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: async () => {
+      const mission = await getMission();
+      return mission ? `[Mission]\n${mission}` : "No mission is set. Set one with `/autoapp mission <text>` so every new task carries it.";
+    },
   },
 ];
 
