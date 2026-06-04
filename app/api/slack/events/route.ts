@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 import { after } from "next/server";
 import { handleMention, recordSlackMessage } from "@/lib/slack/handlers";
 import { nudgeActiveTasks } from "@/lib/autoapp/execute";
+import { isMessageTrackedByTask } from "@/lib/autoapp/task";
 import { getBotUserId } from "@/lib/slack/client";
 import { postToGeneral } from "@/lib/slack/postMessage";
+import { markMessageDone, markMessageWorking } from "@/lib/slack/reactions";
 import { verifySlackRequest } from "@/lib/slack/verify";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
@@ -37,14 +39,13 @@ function shouldHandleConversationalReply(event: SlackEvent) {
 
 /**
  * Where AutoApp's reply (and any task progress it streams) should land. A
- * brand-new top-level `@autoapp` mention is handled exactly like a `/autoapp`
- * slash command: AutoApp opens its own fresh thread in #general instead of
- * threading everything under the user's message, so a mention and a slash
- * command produce the same result. Mentions and conversational messages that
- * are already inside a thread keep replying in that thread.
+ * top-level `@autoapp` mention is answered inline in a thread hanging off the
+ * user's own message (`event.ts`), so the response and any task updates stay
+ * attached to the request the user can see. Mentions and conversational
+ * messages that are already inside a thread keep replying in that thread.
  */
 function replyThreadTs(event: SlackEvent) {
-  return event.thread_ts || undefined;
+  return event.thread_ts || event.ts || undefined;
 }
 
 async function processEvent(event: SlackEvent) {
@@ -75,12 +76,24 @@ async function processEvent(event: SlackEvent) {
   if (!shouldRespond) return;
 
   const threadTs = replyThreadTs(event);
+  // For an @mention, react to the user's message (the thread root) with :eyes:
+  // so they can immediately see AutoApp picked the request up. The reaction
+  // target matches the task's slackRootTs, so a task launched from this mention
+  // can later swap :eyes: for :white_check_mark:/:warning: on the same message.
+  const reactionTs = mentions ? threadTs : undefined;
+  if (reactionTs) await markMessageWorking(reactionTs);
+
   try {
     const response = await handleMention(event.text || "", event.user || "unknown", { threadTs, sourceTs: event.ts });
     await postToGeneral(response, threadTs);
+    // A mention that launched a task hands its reaction off to the task
+    // lifecycle (it owns the same message via slackRootTs). A read-only request
+    // like status has no backing task, so finalize the :eyes: here.
+    if (reactionTs && !(await isMessageTrackedByTask(reactionTs))) await markMessageDone(reactionTs, true);
   } catch (error) {
     console.error("[Slack events] Failed to handle mention:", error instanceof Error ? error.message : error);
     await postToGeneral("I hit an unexpected error handling that. The team can check the logs; try `@autoapp status` or rephrase your request.", threadTs);
+    if (reactionTs) await markMessageDone(reactionTs, false);
   }
 }
 

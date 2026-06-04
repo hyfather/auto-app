@@ -66,3 +66,22 @@ export async function syncTaskReaction(slackRootTs: string | null | undefined, s
     logReactionError("add", error);
   }
 }
+
+/**
+ * Mark a mentioned message as "AutoApp is working on it" with :eyes:. Used when
+ * a user @mentions AutoApp so they get immediate feedback before any task is
+ * launched (or for a read-only request like status that never launches a task).
+ */
+export async function markMessageWorking(messageTs: string | null | undefined): Promise<void> {
+  await syncTaskReaction(messageTs, "queued");
+}
+
+/**
+ * Close out a mention that did not hand off to a task lifecycle: swap :eyes: for
+ * :white_check_mark: when AutoApp answered successfully, or :warning: when it
+ * failed. Task-backed mentions are left alone — their reaction is reconciled by
+ * the task lifecycle as the work progresses.
+ */
+export async function markMessageDone(messageTs: string | null | undefined, ok: boolean): Promise<void> {
+  await syncTaskReaction(messageTs, ok ? "completed" : "failed");
+}
