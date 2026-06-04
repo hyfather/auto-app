@@ -53,6 +53,17 @@ export async function findActiveTaskByReference(reference: string) {
   );
 }
 
+/**
+ * Whether any task is anchored to this Slack message (its `slackRootTs`). When
+ * true, the task lifecycle owns that message's reaction (it swaps :eyes: for
+ * :white_check_mark:/:warning: as the work progresses), so a mention handler
+ * should not finalize the reaction itself.
+ */
+export async function isMessageTrackedByTask(slackRootTs: string): Promise<boolean> {
+  const task = await prisma.task.findFirst({ where: { slackRootTs }, select: { id: true } });
+  return Boolean(task);
+}
+
 export async function getLatestTask() {
   return prisma.task.findFirst({ orderBy: { updatedAt: "desc" }, include: { memories: { orderBy: { createdAt: "desc" }, take: 20 } } });
 }
