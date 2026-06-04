@@ -7,8 +7,8 @@ export default function Home() {
     <main className="page">
       <div className="shell">
         <nav className="nav">
-          <div className="brand">AutoApp</div>
-          <div className="pill">Controlled from Slack #general</div>
+          <div className="brand">This Week in SF</div>
+          <div className="pill">Fresh picks every Monday</div>
         </nav>
         <Hero />
         <Offer />
