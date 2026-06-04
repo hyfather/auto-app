@@ -7,7 +7,7 @@ AutoApp is a Slack-native autonomous app builder and operator. It has two facets
 
 AutoApp intentionally does **not** include an `/admin` UI. Slack is the control plane.
 
-There is no "mission" and no automatic web-app scoring. AutoApp only acts on **tasks** a human requests in Slack.
+There is no automatic web-app scoring. AutoApp only acts on **tasks** a human requests in Slack. You can optionally set one overarching, durable **mission** (`/autoapp mission <text>`) that is folded into the prompt of every new Cursor cloud agent task alongside the specific request.
 
 ## The tool-calling agent
 
@@ -27,7 +27,7 @@ AutoApp runs up to **5 tasks in parallel**. When 5 tasks are already in flight, 
 Each task:
 
 1. Is created from your Slack request and immediately dispatched to a Cursor cloud agent with `autoCreatePR` enabled.
-2. Gets a focused prompt: the task request plus do/don't guardrails and acceptance criteria — no mission framing, no evaluation noise.
+2. Gets a focused prompt: the task request plus do/don't guardrails and acceptance criteria, prefixed with the overarching mission when one is set.
 3. Opens a pull request, which AutoApp watches through the GitHub REST API and merges once it is mergeable and checks are green.
 
 A merged PR on `main` is AutoApp's success condition: once the change lands on the default branch the task is marked successful and the loop closes — whether AutoApp merged it through the API or GitHub native auto-merge did. AutoApp does **not** block waiting for a Vercel production-deploy signal.
@@ -51,6 +51,7 @@ Configure one `/autoapp` slash command pointed at `/api/slack/commands`. Everyth
 - `/autoapp queue` (aliases `tasks`, `list`) — list every queued/in-flight task with its `AUTO-XXXXXX` code, status, and PR link.
 - `/autoapp update <task> <new instructions>` — revise a task. `<task>` is its `AUTO-XXXXXX` code or queue slot like `#2`. Before launch it rewrites the request; after launch it sends a follow-up to the running Cursor cloud agent.
 - `/autoapp cancel <task>` — cancel one task and stop its Cursor cloud agent. `/autoapp cancel all` cancels every active task.
+- `/autoapp mission <text>` — set or update AutoApp's overarching, durable mission, folded into every new task prompt. `/autoapp mission` shows it; `/autoapp mission clear` removes it.
 - `/autoapp status` — task queue (N/5) plus open PRs with their checks and the last deployment.
 - `/autoapp prs [open|closed|all]` — list pull requests with their state and CI checks.
 - `/autoapp deployments` — show the last deployment and its state.

@@ -14,6 +14,7 @@ const SYSTEM_PROMPT = [
   "- When the user asks you to build, add, change, fix, improve, or implement something in the app, call create_task with their request.",
   "- When they ask what you're working on / to see the queue or running tasks, call list_tasks.",
   "- When they ask to cancel/stop a task, call cancel_task. When they ask to revise a task, call update_task.",
+  "- When they set, change, or clear the overarching durable mission (the `mission` command), call set_mission; when they ask what the mission is, call get_mission.",
   "- For status, pull requests, deployments, or to review/inspect the live app, call get_status, list_pull_requests, get_deployments, or evaluate_app.",
   "Answer general questions directly without calling a tool. Never invent task codes, PR links, or statuses — rely on tool output.",
   "Keep replies concise and Slack-friendly. When a tool returns a message, relay its key information to the user.",
@@ -116,6 +117,15 @@ function extractTaskReference(text: string): string {
 export async function fallbackRoute(message: string, ctx: ToolContext): Promise<string> {
   const text = message.trim();
   const lower = text.toLowerCase();
+
+  // The separate `mission` command manages AutoApp's overarching durable mission.
+  const missionMatch = text.match(/^mission\b[:\s]*([\s\S]*)$/i);
+  if (missionMatch) {
+    const rest = missionMatch[1].trim();
+    if (!rest || /^(show|view|status|current|get|what|\?)\b/i.test(rest)) return TOOLS_BY_NAME.get_mission.execute({}, ctx);
+    if (/^(clear|reset|remove|delete|none|off|unset)\b/i.test(rest)) return TOOLS_BY_NAME.set_mission.execute({ mission: "" }, ctx);
+    return TOOLS_BY_NAME.set_mission.execute({ mission: rest }, ctx);
+  }
 
   if (/\b(cancel|stop|kill|abort|reset)\b/.test(lower)) {
     if (/\b(all|every|everything)\b/.test(lower) || /\b(abort|reset)\b/.test(lower)) {
