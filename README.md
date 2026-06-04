@@ -57,7 +57,7 @@ Configure one `/autoapp` slash command pointed at `/api/slack/commands`. Everyth
 - `/autoapp evaluate` — review the current state of the live app.
 - `/autoapp help`
 
-Mentions such as `@autoapp status`, `@autoapp queue`, `@autoapp prs`, `@autoapp cancel AUTO-AB12CD`, and `@autoapp add a pricing FAQ` are handled by `/api/slack/events`. Mention replies stay in the originating Slack thread, and AutoApp streams progress messages there while the Cursor cloud agent works, the PR is watched, and it is merged.
+Mentions such as `@autoapp status`, `@autoapp queue`, `@autoapp prs`, `@autoapp cancel AUTO-AB12CD`, and `@autoapp add a pricing FAQ` are handled by `/api/slack/events` and behave exactly like the equivalent `/autoapp` slash command. A top-level mention makes AutoApp open its own fresh thread in `#general` and stream progress there (the same as a slash command) rather than threading the work under your message. Mentions you make as a reply inside an existing thread stay in that thread so follow-ups read naturally.
 
 The events and slash-command endpoints acknowledge Slack within its timeout window and process work in the background (`after()`), verify request signatures with replay protection, de-duplicate Slack retries, and never let a Slack/API failure crash the handler.
 
