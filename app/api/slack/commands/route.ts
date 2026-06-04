@@ -11,6 +11,44 @@ import { verifySlackRequest } from "@/lib/slack/verify";
 // reply delivered via response_url.
 const SYNCHRONOUS_COMMANDS = new Set(["help", "controls"]);
 
+// Read-only and management commands (status, queue, PRs, deployments, evaluate,
+// summarize, cancel, update) produce a one-shot answer for the requester that is
+// NOT streamed to #general. Their reply must be relayed back via response_url,
+// otherwise it is computed and silently discarded. A plain build request instead
+// streams its progress as a new #general thread, so for that flow we only send a
+// quick ephemeral ack and skip a redundant second confirmation.
+const RELAY_REPLY_COMMANDS = new Set([
+  "status",
+  "queue",
+  "tasks",
+  "list",
+  "runs",
+  "ls",
+  "prs",
+  "pr",
+  "pulls",
+  "pull",
+  "deployments",
+  "deployment",
+  "deploys",
+  "deploy",
+  "evaluate",
+  "evaluation",
+  "inspect",
+  "review",
+  "summary",
+  "summarize",
+  "summarise",
+  "cancel",
+  "stop",
+  "kill",
+  "abort",
+  "reset",
+  "update",
+  "revise",
+  "edit",
+]);
+
 async function postToResponseUrl(responseUrl: string, text: string) {
   try {
     await fetch(responseUrl, {
@@ -41,12 +79,15 @@ export async function POST(req: Request) {
   });
 
   if (responseUrl && !SYNCHRONOUS_COMMANDS.has(command)) {
+    const relayReply = RELAY_REPLY_COMMANDS.has(command);
     after(async () => {
       try {
-        // The agent posts the request as a new thread in #general and streams
-        // progress there, so we intentionally drop its reply instead of relaying
-        // it back as a second ephemeral confirmation.
-        await handleAutoappCommand(text, userId);
+        const response = await handleAutoappCommand(text, userId);
+        // Read-only/management commands (status, queue, prs, cancel, …) produce
+        // a reply that isn't streamed to #general, so relay it back to the
+        // requester. A build request streams progress as its own #general
+        // thread, so we drop its reply to avoid a redundant ephemeral.
+        if (relayReply) await postToResponseUrl(responseUrl, response);
       } catch (error) {
         console.error("[Slack commands] Deferred command failed:", error instanceof Error ? error.message : error);
         await postToResponseUrl(responseUrl, "Something went wrong running that command. Check #general for any partial progress, then try again.");
@@ -54,11 +95,12 @@ export async function POST(req: Request) {
     });
     // Acknowledge immediately with an ephemeral confirmation. A bare empty 200
     // leaves the user with no feedback (and Slack can surface its own "didn't
-    // work" error for a body-less response), which made starting a task feel
-    // broken; the real progress still streams as a new thread in #general.
+    // work" error for a body-less response), which made the command feel broken.
     return NextResponse.json({
       response_type: "ephemeral",
-      text: "On it — starting that now. I'll open a thread in #general and stream progress there.",
+      text: relayReply
+        ? "On it — fetching that now."
+        : "On it — starting that now. I'll open a thread in #general and stream progress there.",
     });
   }
 
