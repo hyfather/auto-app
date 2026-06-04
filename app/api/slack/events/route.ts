@@ -28,8 +28,16 @@ function shouldHandleConversationalReply(event: SlackEvent) {
   return /\?|task|start|begin|kick off|launch|run|improve|make|change|remember|also|actually|instead|status/i.test(text);
 }
 
-function shouldReplyInThread(text: string, mentions: boolean, threadTs?: string) {
-  return mentions || Boolean(threadTs) || /(?:^|\s)status(?:\b|\?)/i.test(text);
+/**
+ * Where AutoApp's reply (and any task progress it streams) should land. A
+ * brand-new top-level `@autoapp` mention is handled exactly like a `/autoapp`
+ * slash command: AutoApp opens its own fresh thread in #general instead of
+ * threading everything under the user's message, so a mention and a slash
+ * command produce the same result. Mentions and conversational messages that
+ * are already inside a thread keep replying in that thread.
+ */
+function replyThreadTs(event: SlackEvent) {
+  return event.thread_ts || undefined;
 }
 
 async function processEvent(event: SlackEvent) {
@@ -43,7 +51,7 @@ async function processEvent(event: SlackEvent) {
       return;
     }
     if (mentions) {
-      await postToGeneral(`[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`, shouldReplyInThread(event.text || "", mentions, event.thread_ts) ? event.thread_ts || event.ts : undefined);
+      await postToGeneral(`[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`, replyThreadTs(event));
     }
     return;
   }
@@ -51,7 +59,7 @@ async function processEvent(event: SlackEvent) {
   const shouldRespond = mentions ? classified.authorType !== "autoapp" : shouldHandleConversationalReply(event) && classified.authorType === "human";
   if (!shouldRespond) return;
 
-  const threadTs = shouldReplyInThread(event.text || "", mentions, event.thread_ts) ? event.thread_ts || event.ts : undefined;
+  const threadTs = replyThreadTs(event);
   try {
     const response = await handleMention(event.text || "", event.user || "unknown", { threadTs, sourceTs: event.ts });
     await postToGeneral(response, threadTs);
