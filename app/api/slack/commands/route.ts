@@ -45,16 +45,21 @@ export async function POST(req: Request) {
       try {
         // The agent posts the request as a new thread in #general and streams
         // progress there, so we intentionally drop its reply instead of relaying
-        // it back as an ephemeral ("Only visible to you") confirmation.
+        // it back as a second ephemeral confirmation.
         await handleAutoappCommand(text, userId);
       } catch (error) {
         console.error("[Slack commands] Deferred command failed:", error instanceof Error ? error.message : error);
         await postToResponseUrl(responseUrl, "Something went wrong running that command. Check #general for any partial progress, then try again.");
       }
     });
-    // Acknowledge silently with an empty 200 so Slack shows no ephemeral
-    // confirmation — the request simply appears as a new thread in #general.
-    return new NextResponse(null, { status: 200 });
+    // Acknowledge immediately with an ephemeral confirmation. A bare empty 200
+    // leaves the user with no feedback (and Slack can surface its own "didn't
+    // work" error for a body-less response), which made starting a task feel
+    // broken; the real progress still streams as a new thread in #general.
+    return NextResponse.json({
+      response_type: "ephemeral",
+      text: "On it — starting that now. I'll open a thread in #general and stream progress there.",
+    });
   }
 
   try {
