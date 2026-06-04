@@ -17,7 +17,13 @@ type SlackEvent = {
   thread_ts?: string;
 };
 
-function mentionsAutoapp(text: string) {
+function mentionsAutoapp(event: SlackEvent) {
+  // A real "@autoapp" mention is delivered as an `app_mention` event whose text
+  // contains the bot's user-id form (`<@U…>`), not the literal "@autoapp". Trust
+  // the event type so mentions work even when the optional AUTOAPP_BOT_USER_ID is
+  // unset; fall back to text matching for plain message events.
+  if (event.type === "app_mention") return true;
+  const text = event.text || "";
   const botId = process.env.AUTOAPP_BOT_USER_ID;
   return Boolean((botId && text.includes(botId)) || /@autoapp/i.test(text));
 }
@@ -33,7 +39,7 @@ function shouldReplyInThread(text: string, mentions: boolean, threadTs?: string)
 }
 
 async function processEvent(event: SlackEvent) {
-  const mentions = mentionsAutoapp(event.text || "");
+  const mentions = mentionsAutoapp(event);
   let classified;
   try {
     classified = await recordSlackMessage(event);
