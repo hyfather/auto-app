@@ -34,7 +34,7 @@ export async function POST(request: Request) {
       update: {},
       create: { email, source: source || "landing_page" },
     });
-    return NextResponse.json({ ok: true, message: "You're on the list. We'll email you when AutoApp launches." });
+    return NextResponse.json({ ok: true, message: "You're on the list. We'll email you the roundup every Monday." });
   } catch (error) {
     if (isMissingDatabaseSchemaError(error)) {
       return NextResponse.json({ ok: false, error: DATABASE_SCHEMA_SETUP_MESSAGE }, { status: 503 });

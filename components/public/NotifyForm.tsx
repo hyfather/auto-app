@@ -23,7 +23,7 @@ export function NotifyForm({ source }: { source?: string }) {
       const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; error?: string };
       if (response.ok && data.ok) {
         setStatus("success");
-        setMessage(data.message || "You're on the list. We'll email you when AutoApp launches.");
+        setMessage(data.message || "You're on the list. We'll email you the roundup every Monday.");
         setEmail("");
       } else {
         setStatus("error");
@@ -54,7 +54,7 @@ export function NotifyForm({ source }: { source?: string }) {
           aria-label="Email address"
         />
         <button className="button primary notify-button" type="submit" disabled={status === "submitting"}>
-          {status === "submitting" ? "Adding…" : "Notify me at launch"}
+          {status === "submitting" ? "Adding…" : "Send me the roundup"}
         </button>
       </div>
       {message ? (
@@ -62,7 +62,7 @@ export function NotifyForm({ source }: { source?: string }) {
           {message}
         </p>
       ) : (
-        <p className="notify-hint">No spam—just a single email when AutoApp goes live.</p>
+        <p className="notify-hint">No spam—just one short email of SF picks every Monday.</p>
       )}
     </form>
   );

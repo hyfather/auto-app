@@ -11,7 +11,7 @@ export function Hero() {
           neighborhood pop-ups, late-night hackathons, and one-night-only happenings. We comb the city so you find the good
           stuff before it sells out.
         </p>
-        <CTA primary="See this week's picks" secondary="How it works" primaryHref="#offer" secondaryHref="#details" />
+        <CTA primary="Get the weekly roundup" secondary="How it works" primaryHref="#subscribe" secondaryHref="#details" />
       </div>
       <aside className="card">
         <h2>This week in the city</h2>
