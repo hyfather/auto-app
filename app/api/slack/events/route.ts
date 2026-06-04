@@ -18,7 +18,20 @@ type SlackEvent = {
   channel?: string;
   ts?: string;
   thread_ts?: string;
+  // `reaction_added`/`reaction_removed` events describe the reacted-to message
+  // under `item` (with its own `channel`) rather than at the top level.
+  reaction?: string;
+  item?: { type?: string; channel?: string; ts?: string };
 };
+
+/**
+ * The channel an event belongs to. Message/app_mention events carry it at the
+ * top level; reaction events carry it on `item.channel`. Normalizing here lets
+ * the #general gate accept reactions too.
+ */
+function eventChannel(event: SlackEvent): string | undefined {
+  return event.channel || event.item?.channel;
+}
 
 function mentionsAutoapp(event: SlackEvent, botUserId?: string | null) {
   // A real "@autoapp" mention is delivered as an `app_mention` event whose text
@@ -97,6 +110,20 @@ async function processEvent(event: SlackEvent) {
   }
 }
 
+/**
+ * A reaction added to a message in #general is treated as a manual "wake up"
+ * nudge. On Vercel's free plan the scheduled cron (`/api/cron/poll`) only runs
+ * once a day, so reacting to a message (e.g. one of AutoApp's status posts) lets
+ * a user advance every in-flight task on demand. AutoApp's own lifecycle
+ * reactions (:eyes:/:white_check_mark:/:warning:) are ignored so its reaction
+ * changes can't trigger a self-perpetuating loop.
+ */
+async function processReactionEvent(event: SlackEvent): Promise<void> {
+  const botUserId = await getBotUserId();
+  if (botUserId && event.user === botUserId) return;
+  await nudgeActiveTasks();
+}
+
 export async function POST(req: Request) {
   const rawBody = await req.text();
   if (!verifySlackRequest(req, rawBody)) return NextResponse.json({ error: "invalid signature" }, { status: 401 });
@@ -116,7 +143,7 @@ export async function POST(req: Request) {
   if (req.headers.get("x-slack-retry-num")) return NextResponse.json({ ok: true });
 
   const event = body.event;
-  if (!event || event.channel !== process.env.SLACK_GENERAL_CHANNEL_ID || event.subtype === "bot_message_deleted") {
+  if (!event || eventChannel(event) !== process.env.SLACK_GENERAL_CHANNEL_ID || event.subtype === "bot_message_deleted") {
     return NextResponse.json({ ok: true });
   }
 
@@ -125,6 +152,12 @@ export async function POST(req: Request) {
   // Cursor agent's PR gets discovered, watched, and merged even between cron runs.
   after(async () => {
     try {
+      // A reaction carries no new content to record or reply to — it is purely a
+      // manual wake-up signal that advances in-flight tasks (see above).
+      if (event.type === "reaction_added") {
+        await processReactionEvent(event);
+        return;
+      }
       await processEvent(event);
     } catch (error) {
       console.error("[Slack events] Unhandled processing error:", error instanceof Error ? error.message : error);

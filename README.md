@@ -60,6 +60,8 @@ Configure one `/autoapp` slash command pointed at `/api/slack/commands`. Everyth
 
 Mentions such as `@autoapp status`, `@autoapp queue`, `@autoapp prs`, `@autoapp cancel AUTO-AB12CD`, and `@autoapp add a pricing FAQ` are handled by `/api/slack/events` and behave exactly like the equivalent `/autoapp` slash command. A top-level mention makes AutoApp open its own fresh thread in `#general` and stream progress there (the same as a slash command) rather than threading the work under your message. Mentions you make as a reply inside an existing thread stay in that thread so follow-ups read naturally.
 
+Reacting to a message in `#general` (for example adding any emoji to one of AutoApp's status posts) wakes AutoApp up: the `reaction_added` event advances every in-flight task on demand. This matters on Vercel's free plan, where the scheduled cron (`/api/cron/poll`) only runs once a day — a reaction lets you push tasks forward between cron runs without typing a command. Subscribe the Slack app's bot events to `reaction_added` (alongside `app_mention` and `message.channels`) for this to fire.
+
 The events and slash-command endpoints acknowledge Slack within its timeout window and process work in the background (`after()`), verify request signatures with replay protection, de-duplicate Slack retries, and never let a Slack/API failure crash the handler.
 
 ## Safety rules
@@ -109,5 +111,5 @@ The `/` route renders a static landing page describing AutoApp as a Slack-contro
 - A tool-calling agent (`lib/agent`) backing the Slack control plane
 - Cursor Cloud Agents API as the implementation worker
 - GitHub REST polling and direct PR merge
-- A scheduled sweep (`/api/cron/poll`) that advances in-flight tasks
+- A scheduled sweep (`/api/cron/poll`) that advances in-flight tasks; Slack messages, mentions, slash commands, and reactions also nudge the same sweep on demand (important on Vercel's free plan, where the cron only runs daily)
 - Vercel deployment through the connected GitHub repository
