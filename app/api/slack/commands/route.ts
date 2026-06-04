@@ -43,14 +43,18 @@ export async function POST(req: Request) {
   if (responseUrl && !SYNCHRONOUS_COMMANDS.has(command)) {
     after(async () => {
       try {
-        const response = await handleAutoappCommand(text, userId);
-        await postToResponseUrl(responseUrl, response);
+        // The agent posts the request as a new thread in #general and streams
+        // progress there, so we intentionally drop its reply instead of relaying
+        // it back as an ephemeral ("Only visible to you") confirmation.
+        await handleAutoappCommand(text, userId);
       } catch (error) {
         console.error("[Slack commands] Deferred command failed:", error instanceof Error ? error.message : error);
         await postToResponseUrl(responseUrl, "Something went wrong running that command. Check #general for any partial progress, then try again.");
       }
     });
-    return NextResponse.json({ response_type: "ephemeral", text: "On it — running that now. I'll stream progress in #general and reply here when the task is set up." });
+    // Acknowledge silently with an empty 200 so Slack shows no ephemeral
+    // confirmation — the request simply appears as a new thread in #general.
+    return new NextResponse(null, { status: 200 });
   }
 
   try {
