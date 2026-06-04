@@ -7,6 +7,7 @@ import { HELP_TEXT } from "@/lib/agent/help";
 import { classifySlackMessage } from "./classifySlackMessage";
 import { parseToolUpdate } from "./parseToolUpdate";
 import { postToGeneral } from "./postMessage";
+import { syncTaskReaction } from "./reactions";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
 type HandlerOptions = { threadTs?: string; sourceTs?: string };
@@ -101,6 +102,7 @@ async function updateTaskFromTool(taskId: string, tool: ReturnType<typeof parseT
   await logAutoappEvent("tool_update", { taskId, tool });
   const task = await prisma.task.findUnique({ where: { id: taskId } });
   const threadTs = task?.slackRootTs || undefined;
+  if (task) await syncTaskReaction(task.slackRootTs, task.status);
   await postToGeneral(`[${tool.source}] ${tool.eventType}${tool.prUrl ? ` — ${tool.prUrl}` : ""}${tool.deploymentUrl ? ` — ${tool.deploymentUrl}` : ""}`, threadTs);
   if (["pr_opened", "pr_updated", "run_finished", "checks_passed", "preview_deployment_ready"].includes(tool.eventType)) await requestAutonomousMergeIfReady(taskId);
   // A merged PR on main is the success condition: the change is live on the

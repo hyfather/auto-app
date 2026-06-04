@@ -1,6 +1,7 @@
 import type { Task, Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { postToGeneral } from "@/lib/slack/postMessage";
+import { syncTaskReaction } from "@/lib/slack/reactions";
 import {
   CursorApiError,
   createCloudAgent,
@@ -125,6 +126,9 @@ export async function createTask(request: string, userId: string = AUTOAPP_ACTOR
   await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "task_created", payload: { taskId: task.id, request: text, userId, threadTs }, relatedTaskId: task.id } });
   const message = await postToGeneral(visibleLog(code, "Action", `Queued a new task and launching a Cursor cloud agent to implement it.\nRequest: ${text}`), threadTs);
   if (!threadTs && message.ts) await prisma.task.update({ where: { id: task.id }, data: { slackRootTs: message.ts } });
+  // Mark the originating Slack message with :eyes: so the requester can see the
+  // task is in flight; later transitions swap this for :white_check_mark: or :warning:.
+  await syncTaskReaction(threadTs || message.ts, "queued");
   await launchTaskAgent(task.id);
   return { status: "started", task, activeCount: activeCount + 1 };
 }
@@ -144,6 +148,7 @@ export async function launchTaskAgent(taskId: string): Promise<void> {
   if (!isCursorConfigured()) {
     await prisma.task.update({ where: { id: taskId }, data: { status: "failed", resultSummary: "Cursor cloud agent is not configured (CURSOR_API_KEY / CURSOR_AGENT_REPO_URL)." } });
     await postToGeneral(visibleLog(code, "Waiting", "I queued this task but cannot dispatch it yet: set `CURSOR_API_KEY` and `CURSOR_AGENT_REPO_URL` so I can launch a Cursor cloud agent to implement it."), threadTs);
+    await syncTaskReaction(threadTs, "failed");
     return;
   }
 
@@ -165,6 +170,7 @@ export async function launchTaskAgent(taskId: string): Promise<void> {
     await prisma.task.update({ where: { id: taskId }, data: { status: "failed", resultSummary: `Failed to launch Cursor cloud agent: ${detail}` } });
     await prisma.integrationEvent.create({ data: { source: "cursor", eventType: "agent_launch_failed", payload: { taskId, detail }, relatedTaskId: taskId } });
     await postToGeneral(visibleLog(code, "Result", `I could not launch the Cursor cloud agent for ${code}: ${detail}. Ask again once the issue is resolved.`), threadTs);
+    await syncTaskReaction(threadTs, "failed");
   }
 }
 
@@ -187,6 +193,7 @@ export async function pollTaskAgent(taskId: string): Promise<boolean> {
     if (error instanceof CursorApiError && error.status === 404) {
       await prisma.task.update({ where: { id: taskId }, data: { status: "failed", resultSummary: "Cursor cloud agent run was not found." } });
       await postToGeneral(visibleLog(code, "Result", "The Cursor cloud agent run is no longer available. Ask AutoApp to start the task again."), threadTs);
+      await syncTaskReaction(threadTs, "failed");
       return true;
     }
     return false;
@@ -224,6 +231,7 @@ export async function pollTaskAgent(taskId: string): Promise<boolean> {
   }
 
   if (Object.keys(data).length) await prisma.task.update({ where: { id: taskId }, data });
+  if (typeof data.status === "string") await syncTaskReaction(threadTs, data.status);
   await prisma.integrationEvent.create({ data: { source: "cursor", eventType: `run_${run.status.toLowerCase()}`, payload: { taskId, runId: run.id, prUrl: prUrl ?? null }, relatedTaskId: taskId } });
 
   if (prUrl || headBranch || task.githubPrUrl) await reconcileTaskPullRequest(taskId, { prUrl, headBranch });
@@ -359,6 +367,7 @@ export async function reconcileTaskPullRequest(taskId: string, options: { prUrl?
       data.resultSummary = `Pull request ${pr.html_url} was closed without being merged.`;
       await postOnce(taskId, "github_pr_closed_unmerged", code, "Result", `GitHub reports ${pr.html_url} was closed without being merged. This task is stopped.`, threadTs);
       await updateTaskIfNeeded(taskId, data);
+      await syncTaskReaction(threadTs, "failed");
     }
     return true;
   }
@@ -367,6 +376,7 @@ export async function reconcileTaskPullRequest(taskId: string, options: { prUrl?
   if (readiness.status) data.status = readiness.status;
   if (readiness.resultSummary) data.resultSummary = readiness.resultSummary;
   await updateTaskIfNeeded(taskId, data);
+  if (readiness.status === "failed") await syncTaskReaction(threadTs, "failed");
 
   if (!readiness.readyToMerge) {
     if (readiness.waitingMessage) await postOnce(taskId, readiness.eventType, code, "Waiting", readiness.waitingMessage, threadTs);
@@ -500,6 +510,7 @@ export async function completeTask(taskId: string, resultSummary: string) {
   const task = await prisma.task.update({ where: { id: taskId }, data: { status: "completed", resultSummary } });
   const code = formatTaskCode(task.id);
   await postToGeneral(visibleLog(code, "Result", `${resultSummary}\nNext step: ask AutoApp for another change in Slack whenever you're ready.`), task.slackRootTs || undefined);
+  await syncTaskReaction(task.slackRootTs, task.status);
   return task;
 }
 
@@ -529,6 +540,7 @@ export async function cancelTask(taskId: string, userId: string = AUTOAPP_ACTOR,
   const updated = await prisma.task.update({ where: { id: taskId }, data: { status: "cancelled", resultSummary: `Cancelled from Slack${agentStopped ? " (Cursor cloud agent stopped)" : ""}.` } });
   await prisma.integrationEvent.create({ data: { source: "autoapp", eventType: "task_cancelled", payload: { taskId, userId, agentStopped }, relatedTaskId: taskId } });
   await postToGeneral(visibleLog(code, "Action", `Cancelled this task at your request.${agentStopped ? " I asked Cursor to stop the cloud agent." : ""}`), threadTs);
+  await syncTaskReaction(threadTs, updated.status);
   return { task: updated, agentStopped };
 }
 
