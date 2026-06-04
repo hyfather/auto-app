@@ -4,7 +4,7 @@ import { getActiveTasks } from "@/lib/autoapp/task";
 import { completeTask, requestAutonomousMergeIfReady } from "@/lib/autoapp/execute";
 import { runAutoappAgent } from "@/lib/agent/runAgent";
 import { HELP_TEXT } from "@/lib/agent/help";
-import { classifySlackMessage } from "./classifySlackMessage";
+import { classifySlackMessage, type ClassificationOutput } from "./classifySlackMessage";
 import { parseToolUpdate } from "./parseToolUpdate";
 import { postToGeneral } from "./postMessage";
 import { syncTaskReaction } from "./reactions";
@@ -46,24 +46,50 @@ function stripAutoappMention(text: string) {
   return text.replace(/<@[^>]+>/g, "").replace(/@autoapp/gi, "").trim();
 }
 
-export async function recordSlackMessage(event: { text?: string; user?: string; bot_id?: string; channel?: string; ts?: string; thread_ts?: string }) {
+export type RecordedSlackMessage = ClassificationOutput & { isDuplicate: boolean };
+
+/**
+ * A single user message can reach us as more than one Slack event (most notably
+ * an `@autoapp` mention arrives as BOTH an `app_mention` and a `message.channels`
+ * twin with the same `ts`). They race on the unique `(channelId, messageTs)`
+ * index, so we insert with `create` and treat a unique-constraint conflict as a
+ * benign duplicate: the row already exists. `isDuplicate` lets callers respond
+ * exactly once instead of doubling up (or, when the loser previously threw,
+ * silently dropping the reply).
+ */
+export async function recordSlackMessage(
+  event: { text?: string; user?: string; bot_id?: string; channel?: string; ts?: string; thread_ts?: string },
+  selfUserId?: string | null,
+): Promise<RecordedSlackMessage> {
   const tool = parseToolUpdate(event.text || "");
   // With several tasks in flight, attribute a GitHub/Vercel/Cursor update to the
   // task it actually references (by PR URL, thread, or AUTO-XXXXXX code) before
   // falling back to the most recent active task.
   const target = await resolveTaskForUpdate(event.text || "", tool, event.thread_ts);
-  const classified = classifySlackMessage({ text: event.text || "", authorId: event.user, botId: event.bot_id, channelId: event.channel, ts: event.ts, recentTaskId: target?.id });
-  if (!event.channel || !event.ts) return classified;
-  const memory = await prisma.slackMemory.upsert({
-    where: { channelId_messageTs: { channelId: event.channel, messageTs: event.ts } },
-    update: {},
-    create: { channelId: event.channel, messageTs: event.ts, threadTs: event.thread_ts, authorId: event.user || event.bot_id || "unknown", authorType: classified.authorType, rawText: event.text || "", normalizedText: (event.text || "").replace(/\s+/g, " ").trim(), classification: classified.classification, importance: classified.importance, relatedTaskId: classified.relatedTaskId || undefined, extractedPrUrl: classified.extractedPrUrl, extractedDeploymentUrl: classified.extractedDeploymentUrl, extractedTaskCode: classified.extractedTaskCode },
-  });
-  if (tool.source !== "unknown") {
+  const classified = classifySlackMessage({ text: event.text || "", authorId: event.user, botId: event.bot_id, channelId: event.channel, ts: event.ts, recentTaskId: target?.id, selfUserId });
+  if (!event.channel || !event.ts) return { ...classified, isDuplicate: false };
+
+  let isDuplicate = false;
+  try {
+    await prisma.slackMemory.create({
+      data: { channelId: event.channel, messageTs: event.ts, threadTs: event.thread_ts, authorId: event.user || event.bot_id || "unknown", authorType: classified.authorType, rawText: event.text || "", normalizedText: (event.text || "").replace(/\s+/g, " ").trim(), classification: classified.classification, importance: classified.importance, relatedTaskId: classified.relatedTaskId || undefined, extractedPrUrl: classified.extractedPrUrl, extractedDeploymentUrl: classified.extractedDeploymentUrl, extractedTaskCode: classified.extractedTaskCode },
+    });
+  } catch (error) {
+    if (!isUniqueConstraintError(error)) throw error;
+    isDuplicate = true;
+  }
+
+  // Only the first event for a given message records integration/tool side
+  // effects, so a duplicate twin event never double-posts a tool update.
+  if (!isDuplicate && tool.source !== "unknown") {
     await prisma.integrationEvent.create({ data: { source: tool.source, eventType: tool.eventType, payload: toJsonPayload(tool), relatedTaskId: target?.id } });
     if (target) await updateTaskFromTool(target.id, tool);
   }
-  return { ...classified, memory };
+  return { ...classified, isDuplicate };
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { code?: unknown }).code === "P2002");
 }
 
 /**

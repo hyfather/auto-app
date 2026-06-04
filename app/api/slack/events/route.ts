@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { after } from "next/server";
 import { handleMention, recordSlackMessage } from "@/lib/slack/handlers";
 import { nudgeActiveTasks } from "@/lib/autoapp/execute";
+import { getBotUserId } from "@/lib/slack/client";
 import { postToGeneral } from "@/lib/slack/postMessage";
 import { verifySlackRequest } from "@/lib/slack/verify";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
@@ -17,15 +18,15 @@ type SlackEvent = {
   thread_ts?: string;
 };
 
-function mentionsAutoapp(event: SlackEvent) {
+function mentionsAutoapp(event: SlackEvent, botUserId?: string | null) {
   // A real "@autoapp" mention is delivered as an `app_mention` event whose text
   // contains the bot's user-id form (`<@U…>`), not the literal "@autoapp". Trust
-  // the event type so mentions work even when the optional AUTOAPP_BOT_USER_ID is
-  // unset; fall back to text matching for plain message events.
+  // the event type so mentions work regardless of configuration; also match the
+  // bot's resolved user id (or literal "@autoapp") so a mention that arrives only
+  // as a plain `message` event is still recognized.
   if (event.type === "app_mention") return true;
   const text = event.text || "";
-  const botId = process.env.AUTOAPP_BOT_USER_ID;
-  return Boolean((botId && text.includes(botId)) || /@autoapp/i.test(text));
+  return Boolean((botUserId && text.includes(botUserId)) || /@autoapp/i.test(text));
 }
 
 function shouldHandleConversationalReply(event: SlackEvent) {
@@ -47,10 +48,13 @@ function replyThreadTs(event: SlackEvent) {
 }
 
 async function processEvent(event: SlackEvent) {
-  const mentions = mentionsAutoapp(event);
+  // Resolve the bot's own user id once so we can both recognize mentions that
+  // arrive as plain `message` events and avoid responding to our own posts.
+  const botUserId = await getBotUserId();
+  const mentions = mentionsAutoapp(event, botUserId);
   let classified;
   try {
-    classified = await recordSlackMessage(event);
+    classified = await recordSlackMessage(event, botUserId);
   } catch (error) {
     if (!isMissingDatabaseSchemaError(error)) {
       console.error("[Slack events] Failed to record message:", error instanceof Error ? error.message : error);
@@ -61,6 +65,11 @@ async function processEvent(event: SlackEvent) {
     }
     return;
   }
+
+  // A single user message can arrive as two events (e.g. an app_mention plus its
+  // message.channels twin). The first one recorded handles it; the duplicate
+  // bails so the user gets exactly one reply.
+  if (classified.isDuplicate) return;
 
   const shouldRespond = mentions ? classified.authorType !== "autoapp" : shouldHandleConversationalReply(event) && classified.authorType === "human";
   if (!shouldRespond) return;
