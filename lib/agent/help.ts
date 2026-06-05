@@ -23,6 +23,7 @@ export const HELP_TEXT = [
   "• `/autoapp deployments` — show the last GitHub deployment and its state.",
   "• `/autoapp vercel` — latest Vercel deployments and their state.",
   "• `/autoapp evaluate` — review the current state of the live app.",
+  "• `/autoapp tools` — list the tools (capabilities) AutoApp can use.",
   "",
   "AutoApp is agentic: questions like `@autoapp how is operational health?` are answered from GitHub/Vercel context, while change requests spin up a Cursor cloud agent.",
   "Mentions like `@autoapp queue`, `@autoapp cancel AUTO-AB12CD`, `@autoapp status`, and `@autoapp add a pricing FAQ` all work too and stay in the Slack thread.",
