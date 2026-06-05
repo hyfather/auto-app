@@ -32,6 +32,8 @@ const RELAY_REPLY_COMMANDS = new Set([
   "deployment",
   "deploys",
   "deploy",
+  "vercel",
+  "health",
   "evaluate",
   "evaluation",
   "inspect",
