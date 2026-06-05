@@ -1,35 +1,57 @@
 import type OpenAI from "openai";
 import { getOpenAIClient } from "@/lib/ai/openai";
 import { MAX_ACTIVE_TASKS } from "@/lib/autoapp/task";
+import type { ConversationTurn } from "@/lib/slack/threadHistory";
 import { HELP_TEXT } from "./help";
 import { TOOLS, TOOLS_BY_NAME, type ToolContext } from "./tools";
 
 const MAX_TOOL_ITERATIONS = 6;
 
+/**
+ * How the message reached AutoApp. A `command`/`mention` is an explicit address
+ * to AutoApp, so an unmatched message defaults to creating a task. A `channel`
+ * message is just someone talking in #general, so AutoApp chats back and only
+ * creates a task when the intent is clearly a change request.
+ */
+export type AgentSource = "command" | "mention" | "channel";
+
+/** Context for a single agent turn, including prior thread turns for continuity. */
+export type AgentContext = ToolContext & { history?: ConversationTurn[]; source?: AgentSource };
+
 const SYSTEM_PROMPT = [
-  "You are AutoApp, an autonomous app operator controlled from a single Slack channel.",
-  "You turn user requests into code changes that are implemented by Cursor cloud agents; each such task opens a pull request that AutoApp watches and merges once GitHub checks pass.",
+  "You are AutoApp: a friendly, sharp engineering teammate who lives in one Slack channel and keeps the team's Vercel-hosted web app (a Next.js frontend) in great shape.",
+  "You turn requests into code changes implemented by Cursor cloud agents; each task opens a pull request that AutoApp watches and merges once GitHub checks pass. The app auto-deploys to Vercel when a PR merges to main.",
   `You run at most ${MAX_ACTIVE_TASKS} tasks in parallel — extra requests are turned away until a slot frees up.`,
-  "Be agentic: think about what the user actually wants and use your tools to answer it. Spinning up a Cursor cloud agent is expensive, so only do it when the user genuinely wants code changed.",
-  "NOT every request needs a Cursor agent. Many requests — especially questions about operational health, status, deployments, or pull requests — can be answered directly by gathering the right context with the read-only tools. Prefer answering with context over creating a task whenever the user is asking a question rather than requesting a change.",
-  "Your tools fall into three groups:",
-  "- Spin up a Cursor agent: create_task — only when the user asks you to build, add, change, fix, improve, or implement something in the app. Also: list_tasks, cancel_task, update_task, set_mission, get_mission to manage that work.",
-  "- Get info from GitHub: get_status (overall operational health), list_pull_requests, get_deployments, and evaluate_app to review the live app.",
-  "- Get info from Vercel: get_vercel_info for the latest Vercel deployments and their state.",
-  "- Explain yourself: list_tools — when the user asks what tools you have access to, what you can do, or your capabilities; report the result, do NOT create a task.",
-  "For an 'how is operational health?' style question, call get_status (and get_vercel_info if more Vercel detail is wanted) and summarize the result — do NOT create a task.",
-  "If the user asks about you — what you can do, what tools or capabilities you have, or how to use you — answer directly by describing your tools and controls. NEVER create a task for a question about your own capabilities.",
-  "Answer general questions directly without calling a tool. Never invent task codes, PR links, or statuses — rely on tool output.",
-  "Keep replies concise and Slack-friendly. When a tool returns a message, relay its key information to the user.",
+  "",
+  "Conversation style — talk like a helpful teammate, not a form:",
+  "- Be warm, concise, and natural. Open with a short friendly acknowledgement, then get to the point. Slack formatting only (no markdown headers).",
+  "- The full thread is provided as conversation history; use it so follow-ups feel continuous and you never re-ask something already answered.",
+  "- Ask a clarifying question when a change request is genuinely ambiguous, risky, or could be built several very different ways (e.g. unclear which page/section, vague visual intent, or missing copy). Ask at most ONE tight round of the few questions that actually matter, then proceed once you have enough to act. Don't interrogate; if the request is clear, just do it.",
+  "- When you start a task, briefly say what you understood and that you'll stream progress in this thread.",
+  "",
+  "Reactions (reacji) are part of how you communicate:",
+  "- You may call react_to_message to emote on the user's message — e.g. 'rocket' when you launch a task, 'thinking_face' when you ask a clarifying question, 'tada' when something ships, 'thumbsup'/'pray' to acknowledge. Use it alongside your text reply when it adds warmth; don't overuse it.",
+  "- Users can also react to your messages to steer you: a ❌/🛑-style reaction on a task message cancels that task, and any reaction nudges in-flight work forward. Mention this naturally if it's helpful.",
+  "",
+  "Choosing what to do — be agentic and decisive:",
+  "- Spinning up a Cursor cloud agent costs real money, so only create_task when the user genuinely wants the app built, changed, fixed, added to, improved, polished, or refactored. Lean toward small, focused frontend changes.",
+  "- Many requests need NO task: questions about operational health, status, the queue, deployments, or pull requests are answered directly by gathering context with the read-only tools. Prefer answering with context over creating a task whenever the user is asking rather than requesting a change.",
+  "- Manage work with list_tasks, cancel_task, update_task, set_mission, get_mission.",
+  "- Read GitHub with get_status (overall health), list_pull_requests, get_deployments, and evaluate_app to inspect the live site.",
+  "- Read Vercel with get_vercel_info for the latest deployments and their state.",
+  "- Use list_tools when asked what you can do or what tools/capabilities you have, and report the result — never create a task for a question about your own capabilities.",
+  "",
+  "Always rely on tool output for facts; never invent task codes, PR links, statuses, or deployment results. Keep replies tight and Slack-friendly, and relay the key information a tool returns.",
 ].join("\n");
 
 /**
- * The tool-calling agent that backs the Slack `/autoapp` command and mentions.
- * When OpenAI is configured it runs a function-calling loop over the AutoApp
- * tool registry; otherwise it falls back to a deterministic keyword router that
+ * The tool-calling agent that backs the Slack `/autoapp` command, mentions, and
+ * plain channel messages. When OpenAI is configured it runs a function-calling
+ * loop over the AutoApp tool registry with the thread's conversation history for
+ * continuity; otherwise it falls back to a deterministic keyword router that
  * calls the same tools, so AutoApp stays usable without an LLM key.
  */
-export async function runAutoappAgent(message: string, ctx: ToolContext): Promise<string> {
+export async function runAutoappAgent(message: string, ctx: AgentContext): Promise<string> {
   const text = message.trim();
   if (!text || /^(help|controls|commands)\b/i.test(text)) return HELP_TEXT;
   // Meta questions about AutoApp's own capabilities are answered with the help
@@ -47,13 +69,17 @@ export async function runAutoappAgent(message: string, ctx: ToolContext): Promis
   }
 }
 
-async function runWithOpenAI(client: OpenAI, text: string, ctx: ToolContext): Promise<string> {
+async function runWithOpenAI(client: OpenAI, text: string, ctx: AgentContext): Promise<string> {
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = TOOLS.map((tool) => ({
     type: "function",
     function: { name: tool.name, description: tool.description, parameters: tool.parameters as unknown as Record<string, unknown> },
   }));
+  const history: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = (ctx.history || [])
+    .filter((turn) => turn.content.trim())
+    .map((turn) => ({ role: turn.role, content: turn.content }));
   const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
     { role: "system", content: SYSTEM_PROMPT },
+    ...history,
     { role: "user", content: text },
   ];
 
@@ -88,7 +114,7 @@ async function runWithOpenAI(client: OpenAI, text: string, ctx: ToolContext): Pr
   return (typeof lastTool?.content === "string" && lastTool.content) || "I wasn't able to complete that request. Try rephrasing it or run `/autoapp help`.";
 }
 
-async function dispatchToolCall(name: string, rawArgs: string, ctx: ToolContext): Promise<string> {
+async function dispatchToolCall(name: string, rawArgs: string, ctx: AgentContext): Promise<string> {
   const tool = TOOLS_BY_NAME[name];
   if (!tool) return `Unknown tool "${name}".`;
   let args: Record<string, unknown> = {};
@@ -134,7 +160,7 @@ function extractTaskReference(text: string): string {
  * the LLM uses, defaulting to create_task so a plain request still launches a
  * Cursor cloud agent.
  */
-export async function fallbackRoute(message: string, ctx: ToolContext): Promise<string> {
+export async function fallbackRoute(message: string, ctx: AgentContext): Promise<string> {
   const text = message.trim();
   const lower = text.toLowerCase();
 
@@ -197,8 +223,33 @@ export async function fallbackRoute(message: string, ctx: ToolContext): Promise<
   }
   if (/\b(summari[sz]e|summary)\b/.test(lower)) return TOOLS_BY_NAME.summarize_task.execute({}, ctx);
 
+  // A plain channel message (someone just talking in #general, not a slash
+  // command or @mention) only becomes a task when it clearly reads as a change
+  // request. Otherwise AutoApp chats back instead of spending a Cursor agent on
+  // small talk. Explicit `command`/`mention` sources keep defaulting to a task.
+  if (ctx.source === "channel" && !looksLikeChangeRequest(lower)) {
+    return CONVERSATIONAL_FALLBACK;
+  }
+
   return TOOLS_BY_NAME.create_task.execute({ request: stripLeadingVerbNoise(text) }, ctx);
 }
+
+/**
+ * Heuristic for whether a free-form channel message is asking for a code/UI
+ * change (so the keyword fallback should launch a task) versus chit-chat.
+ */
+function looksLikeChangeRequest(lower: string): boolean {
+  if (/\b(task|build|ship|implement)\b/.test(lower)) return true;
+  return /\b(add|create|make|change|update|fix|improve|polish|tweak|adjust|redesign|restyle|style|remove|delete|rename|replace|move|hide|show|enable|disable|set|increase|decrease|swap|refactor|wire|integrate|please)\b/.test(
+    lower,
+  );
+}
+
+const CONVERSATIONAL_FALLBACK = [
+  "Hey! I'm AutoApp — I keep the team's Vercel-hosted site in shape.",
+  "Tell me what you'd like to change (e.g. \"make the hero headline say …\" or \"add a pricing FAQ\") and I'll start a task and stream progress here.",
+  "You can also ask me things like `status`, `queue`, `list PRs`, or `deployments`. Type `help` for the full list.",
+].join("\n");
 
 /** Drop a leading `new`/`create`/`add` keyword so `/autoapp new <x>` reads cleanly as the request. */
 function stripLeadingVerbNoise(text: string): string {

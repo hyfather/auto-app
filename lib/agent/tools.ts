@@ -12,8 +12,9 @@ import { formatTaskCode } from "@/lib/autoapp/policies";
 import { summarizeLastDeployment, summarizePullRequests, type PullRequestState } from "@/lib/github/overview";
 import { summarizeVercelDeployments } from "@/lib/vercel/overview";
 import { isVercelConfigured } from "@/lib/vercel/client";
+import { addReaction } from "@/lib/slack/reactions";
 
-export type ToolContext = { userId: string; threadTs?: string; sourceTs?: string };
+export type ToolContext = { userId: string; threadTs?: string; sourceTs?: string; channelId?: string };
 
 export type JsonSchema = {
   type: "object";
@@ -291,6 +292,27 @@ export const TOOLS: ToolDef[] = [
     execute: async () => {
       const mission = await getMission();
       return mission ? `[Mission]\n${mission}` : "No mission is set. Set one with `/autoapp mission <text>` so every new task carries it.";
+    },
+  },
+  {
+    name: "react_to_message",
+    description:
+      "Add an emoji reaction to the user's Slack message to emote and acknowledge — e.g. 'tada' to celebrate a shipped change, 'eyes' while you look into something, 'pray'/'thumbsup' to acknowledge, 'thinking_face' when clarifying, 'rocket' when launching a task. Use this in addition to (not instead of) your text reply when an emoji would make the interaction feel warmer and more responsive. Pass the emoji name without colons.",
+    parameters: {
+      type: "object",
+      properties: {
+        emoji: { type: "string", description: "Slack emoji name without colons, e.g. 'tada', 'rocket', 'eyes', 'thumbsup', 'thinking_face'." },
+      },
+      required: ["emoji"],
+      additionalProperties: false,
+    },
+    execute: async (args, ctx) => {
+      const emoji = str(args.emoji);
+      if (!emoji) return "Tell me which emoji to react with, e.g. 'tada'.";
+      const target = ctx.sourceTs || ctx.threadTs;
+      if (!target) return "There is no message in this conversation to react to right now.";
+      const added = await addReaction(target, emoji);
+      return added ? `Reacted with :${emoji.replace(/^:|:$/g, "")}:.` : `I couldn't add the :${emoji.replace(/^:|:$/g, "")}: reaction (Slack may not be configured or the emoji is unknown).`;
     },
   },
   {
