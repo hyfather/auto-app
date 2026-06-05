@@ -16,6 +16,7 @@ const SYSTEM_PROMPT = [
   "- Spin up a Cursor agent: create_task — only when the user asks you to build, add, change, fix, improve, or implement something in the app. Also: list_tasks, cancel_task, update_task, set_mission, get_mission to manage that work.",
   "- Get info from GitHub: get_status (overall operational health), list_pull_requests, get_deployments, and evaluate_app to review the live app.",
   "- Get info from Vercel: get_vercel_info for the latest Vercel deployments and their state.",
+  "- Explain yourself: list_tools — when the user asks what tools you have access to, what you can do, or your capabilities; report the result, do NOT create a task.",
   "For an 'how is operational health?' style question, call get_status (and get_vercel_info if more Vercel detail is wanted) and summarize the result — do NOT create a task.",
   "If the user asks about you — what you can do, what tools or capabilities you have, or how to use you — answer directly by describing your tools and controls. NEVER create a task for a question about your own capabilities.",
   "Answer general questions directly without calling a tool. Never invent task codes, PR links, or statuses — rely on tool output.",
@@ -165,6 +166,16 @@ export async function fallbackRoute(message: string, ctx: ToolContext): Promise<
     return TOOLS_BY_NAME.update_task.execute({ task: ref, instructions }, ctx);
   }
 
+  // "What tools/capabilities do you have?" is answered from the registry, not a
+  // task. Checked before list_tasks so "list your capabilities" isn't misread as
+  // a queue request.
+  if (
+    /^(tools?|capabilities|abilities)\b/.test(lower) ||
+    /\b(what|which|list)\b.{0,30}\b(tools?|capabilities|abilities)\b/.test(lower) ||
+    /\b(what can you do|what do you do)\b/.test(lower)
+  ) {
+    return TOOLS_BY_NAME.list_tools.execute({}, ctx);
+  }
   if (/\b(queue|tasks|in flight|working on|what are you (doing|building))\b/.test(lower) || /^(list|runs)\b/.test(lower)) {
     return TOOLS_BY_NAME.list_tasks.execute({}, ctx);
   }

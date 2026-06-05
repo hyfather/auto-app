@@ -91,6 +91,22 @@ function stripHtml(html: string): string {
     .trim();
 }
 
+/** Take the first sentence of a tool description for a compact capabilities list. */
+function firstSentence(text: string): string {
+  const match = text.match(/^[\s\S]*?[.!?](?=\s|$)/);
+  return (match ? match[0] : text).trim();
+}
+
+/**
+ * Render the agent's own tool registry as a readable list. This backs the
+ * `list_tools` tool so AutoApp can answer "what tools do you have access to?"
+ * straight from the live registry instead of a hand-maintained description.
+ */
+export function formatToolList(): string {
+  const lines = TOOLS.map((tool) => `• \`${tool.name}\` — ${firstSentence(tool.description)}`);
+  return `[Tools]\nI have access to ${TOOLS.length} tools:\n${lines.join("\n")}`;
+}
+
 /**
  * The tool registry the AutoApp agent can call. Each tool wraps an existing
  * task/GitHub action so the agent decides *which* action to take while the
@@ -276,6 +292,12 @@ export const TOOLS: ToolDef[] = [
       const mission = await getMission();
       return mission ? `[Mission]\n${mission}` : "No mission is set. Set one with `/autoapp mission <text>` so every new task carries it.";
     },
+  },
+  {
+    name: "list_tools",
+    description: "List the tools (capabilities) the AutoApp agent itself can use, each with a one-line summary. Use when the user asks what tools you have access to, what you can do, or what your capabilities are.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    execute: async () => formatToolList(),
   },
 ];
 
