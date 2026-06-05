@@ -17,6 +17,7 @@ const SYSTEM_PROMPT = [
   "- Get info from GitHub: get_status (overall operational health), list_pull_requests, get_deployments, and evaluate_app to review the live app.",
   "- Get info from Vercel: get_vercel_info for the latest Vercel deployments and their state.",
   "For an 'how is operational health?' style question, call get_status (and get_vercel_info if more Vercel detail is wanted) and summarize the result — do NOT create a task.",
+  "If the user asks about you — what you can do, what tools or capabilities you have, or how to use you — answer directly by describing your tools and controls. NEVER create a task for a question about your own capabilities.",
   "Answer general questions directly without calling a tool. Never invent task codes, PR links, or statuses — rely on tool output.",
   "Keep replies concise and Slack-friendly. When a tool returns a message, relay its key information to the user.",
 ].join("\n");
@@ -30,6 +31,9 @@ const SYSTEM_PROMPT = [
 export async function runAutoappAgent(message: string, ctx: ToolContext): Promise<string> {
   const text = message.trim();
   if (!text || /^(help|controls|commands)\b/i.test(text)) return HELP_TEXT;
+  // Meta questions about AutoApp's own capabilities are answered with the help
+  // text, never by spinning up a Cursor cloud agent.
+  if (isCapabilityQuestion(text)) return HELP_TEXT;
 
   const client = getOpenAIClient();
   if (!client) return fallbackRoute(text, ctx);
@@ -99,6 +103,20 @@ async function dispatchToolCall(name: string, rawArgs: string, ctx: ToolContext)
   }
 }
 
+/**
+ * Detect questions about AutoApp's own capabilities (e.g. "what tools do you
+ * have access to?", "what can you do?"). These are answered directly with the
+ * help text rather than being routed to create_task and spinning up a Cursor
+ * cloud agent.
+ */
+export function isCapabilityQuestion(text: string): boolean {
+  const lower = text.toLowerCase();
+  if (/\b(what|which|list)\b[\s\S]*\b(tools?|capabilit(?:y|ies)|commands?|features?|abilities|functions?)\b/.test(lower)) {
+    return true;
+  }
+  return /\bwhat\s+(can|do)\s+you\s+do\b/.test(lower) || /\bwhat\s+are\s+you\s+(able|capable)\b/.test(lower);
+}
+
 function extractTaskReference(text: string): string {
   const code = text.match(/AUTO-?[A-Z0-9]{3,}/i)?.[0];
   if (code) return code;
@@ -118,6 +136,9 @@ function extractTaskReference(text: string): string {
 export async function fallbackRoute(message: string, ctx: ToolContext): Promise<string> {
   const text = message.trim();
   const lower = text.toLowerCase();
+
+  // Capability/meta questions are answered with help, not a Cursor agent.
+  if (isCapabilityQuestion(text)) return HELP_TEXT;
 
   // The separate `mission` command manages AutoApp's overarching durable mission.
   const missionMatch = text.match(/^mission\b[:\s]*([\s\S]*)$/i);
