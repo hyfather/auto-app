@@ -62,14 +62,15 @@ export async function hasAutoappRepliedInThread(
   botUserId: string | null | undefined,
 ): Promise<boolean> {
   if (!channelId || !threadRootTs) return false;
-  const authorClause = botUserId
+  const authorMatch = botUserId
     ? { OR: [{ authorType: "autoapp" as const }, { authorId: botUserId }] }
     : { authorType: "autoapp" as const };
   const row = await prisma.slackMemory.findFirst({
     where: {
       channelId,
-      OR: [{ messageTs: threadRootTs }, { threadTs: threadRootTs }],
-      ...authorClause,
+      // AND-combine the thread match and author match: two bare `OR` keys in one
+      // object would collide (the second silently overwrites the first).
+      AND: [{ OR: [{ messageTs: threadRootTs }, { threadTs: threadRootTs }] }, authorMatch],
     },
     select: { id: true },
   });

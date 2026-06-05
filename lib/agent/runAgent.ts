@@ -240,7 +240,7 @@ export async function fallbackRoute(message: string, ctx: AgentContext): Promise
  */
 function looksLikeChangeRequest(lower: string): boolean {
   if (/\b(task|build|ship|implement)\b/.test(lower)) return true;
-  return /\b(add|create|make|change|update|fix|improve|polish|tweak|adjust|redesign|restyle|style|remove|delete|rename|replace|move|hide|show|enable|disable|set|increase|decrease|swap|refactor|wire|integrate|please)\b/.test(
+  return /\b(add|create|make|change|update|fix|improve|polish|tweak|adjust|redesign|restyle|style|remove|delete|rename|replace|move|hide|show|enable|disable|increase|decrease|swap|refactor|wire|integrate)\b/.test(
     lower,
   );
 }
