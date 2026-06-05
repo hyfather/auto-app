@@ -8,14 +8,15 @@ const MAX_TOOL_ITERATIONS = 6;
 
 const SYSTEM_PROMPT = [
   "You are AutoApp, an autonomous app operator controlled from a single Slack channel.",
-  "You turn user requests into code changes that are implemented by Cursor cloud agents; each task opens a pull request that AutoApp watches and merges once GitHub checks pass.",
+  "You turn user requests into code changes that are implemented by Cursor cloud agents; each such task opens a pull request that AutoApp watches and merges once GitHub checks pass.",
   `You run at most ${MAX_ACTIVE_TASKS} tasks in parallel — extra requests are turned away until a slot frees up.`,
-  "Decide which tool to call based on the user's message:",
-  "- When the user asks you to build, add, change, fix, improve, or implement something in the app, call create_task with their request.",
-  "- When they ask what you're working on / to see the queue or running tasks, call list_tasks.",
-  "- When they ask to cancel/stop a task, call cancel_task. When they ask to revise a task, call update_task.",
-  "- When they set, change, or clear the overarching durable mission (the `mission` command), call set_mission; when they ask what the mission is, call get_mission.",
-  "- For status, pull requests, deployments, or to review/inspect the live app, call get_status, list_pull_requests, get_deployments, or evaluate_app.",
+  "Be agentic: think about what the user actually wants and use your tools to answer it. Spinning up a Cursor cloud agent is expensive, so only do it when the user genuinely wants code changed.",
+  "NOT every request needs a Cursor agent. Many requests — especially questions about operational health, status, deployments, or pull requests — can be answered directly by gathering the right context with the read-only tools. Prefer answering with context over creating a task whenever the user is asking a question rather than requesting a change.",
+  "Your tools fall into three groups:",
+  "- Spin up a Cursor agent: create_task — only when the user asks you to build, add, change, fix, improve, or implement something in the app. Also: list_tasks, cancel_task, update_task, set_mission, get_mission to manage that work.",
+  "- Get info from GitHub: get_status (overall operational health), list_pull_requests, get_deployments, and evaluate_app to review the live app.",
+  "- Get info from Vercel: get_vercel_info for the latest Vercel deployments and their state.",
+  "For an 'how is operational health?' style question, call get_status (and get_vercel_info if more Vercel detail is wanted) and summarize the result — do NOT create a task.",
   "Answer general questions directly without calling a tool. Never invent task codes, PR links, or statuses — rely on tool output.",
   "Keep replies concise and Slack-friendly. When a tool returns a message, relay its key information to the user.",
 ].join("\n");
@@ -146,7 +147,14 @@ export async function fallbackRoute(message: string, ctx: ToolContext): Promise<
   if (/\b(queue|tasks|in flight|working on|what are you (doing|building))\b/.test(lower) || /^(list|runs)\b/.test(lower)) {
     return TOOLS_BY_NAME.list_tasks.execute({}, ctx);
   }
-  if (/\bstatus\b/.test(lower)) return TOOLS_BY_NAME.get_status.execute({}, ctx);
+  // Operational-health / status questions are answered with context, not a task.
+  if (/\bstatus\b/.test(lower) || /\b(operational |op )?health\b/.test(lower) || /\b(how('s| is| are)\b.*\b(things|everything|we|it|the app|going|doing))\b/.test(lower)) {
+    return TOOLS_BY_NAME.get_status.execute({}, ctx);
+  }
+  if (/\bvercel\b/.test(lower)) {
+    const target = /\bprod(uction)?\b/.test(lower) ? "production" : undefined;
+    return TOOLS_BY_NAME.get_vercel_info.execute(target ? { target } : {}, ctx);
+  }
   if (/\b(pull request|pull requests|prs?|pulls)\b/.test(lower)) {
     const state = /\bclosed\b/.test(lower) ? "closed" : /\b(all|merged)\b/.test(lower) ? "all" : "open";
     return TOOLS_BY_NAME.list_pull_requests.execute({ state }, ctx);

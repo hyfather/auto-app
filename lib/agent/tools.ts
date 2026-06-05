@@ -10,6 +10,8 @@ import { clearMission, getMission, setMission } from "@/lib/autoapp/mission";
 import { summarizeLatestTask } from "@/lib/autoapp/summarize";
 import { formatTaskCode } from "@/lib/autoapp/policies";
 import { summarizeLastDeployment, summarizePullRequests, type PullRequestState } from "@/lib/github/overview";
+import { summarizeVercelDeployments } from "@/lib/vercel/overview";
+import { isVercelConfigured } from "@/lib/vercel/client";
 
 export type ToolContext = { userId: string; threadTs?: string; sourceTs?: string };
 
@@ -59,11 +61,13 @@ export async function getStatusText(): Promise<string> {
   const tasks = await getActiveTasks();
   const recentLogs = await prisma.integrationEvent.findMany({ orderBy: { createdAt: "desc" }, take: 5 });
   const queue = tasks.length ? formatTaskList(tasks) : "* none";
-  const [pullRequests, lastDeployment] = await Promise.all([
+  const [pullRequests, lastDeployment, vercel] = await Promise.all([
     summarizePullRequests({ state: "open", withChecks: true, limit: 10, timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS }),
     summarizeLastDeployment({ timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS }),
+    isVercelConfigured() ? summarizeVercelDeployments({ limit: 3, timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS }) : Promise.resolve(""),
   ]);
-  return `[Status]\nActive tasks (${tasks.length}/${MAX_ACTIVE_TASKS}):\n${queue}\nOpen pull requests:\n${indentLines(pullRequests)}\nLast deployment: ${lastDeployment}\nRecent logs:\n${recentLogs.map((log) => `* ${log.createdAt.toISOString()} ${log.source}/${log.eventType}`).join("\n") || "* none"}`;
+  const vercelSection = vercel ? `\nVercel deployments:\n${indentLines(vercel)}` : "";
+  return `[Status]\nActive tasks (${tasks.length}/${MAX_ACTIVE_TASKS}):\n${queue}\nOpen pull requests:\n${indentLines(pullRequests)}\nLast deployment: ${lastDeployment}${vercelSection}\nRecent logs:\n${recentLogs.map((log) => `* ${log.createdAt.toISOString()} ${log.source}/${log.eventType}`).join("\n") || "* none"}`;
 }
 
 function parsePullRequestState(arg: string): PullRequestState {
@@ -178,7 +182,8 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "get_status",
-    description: "Show an overall status snapshot: the active task queue (N/5), open pull requests with their checks, the last deployment, and recent activity logs.",
+    description:
+      "Get an overall operational-health snapshot by gathering context from GitHub and Vercel: the active task queue (N/5), open pull requests with their checks, the last deployment, recent Vercel deployment health, and recent activity logs. Use this to answer 'how is operational health?'-style questions directly, without creating a task.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => getStatusText(),
   },
@@ -198,11 +203,26 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "get_deployments",
-    description: "Show when the app was last deployed and the deployment state. Use when the user asks about deployments.",
+    description: "Get GitHub deployment info: when the app was last deployed and the deployment state. Use when the user asks about deployments from GitHub.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     execute: async () => {
       const body = await summarizeLastDeployment({ timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS });
       return `[Deployment]\nLast deployment: ${body}`;
+    },
+  },
+  {
+    name: "get_vercel_info",
+    description:
+      "Get info from Vercel: the latest deployments and their state (READY / ERROR / BUILDING / …). Use this to answer deployment or operational-health questions about the live app directly, instead of creating a task. Set target to 'production' to limit to production deployments.",
+    parameters: {
+      type: "object",
+      properties: { target: { type: "string", description: "Optional deployment target to filter by, e.g. 'production'." } },
+      additionalProperties: false,
+    },
+    execute: async (args) => {
+      const target = str(args.target).toLowerCase() || undefined;
+      const body = await summarizeVercelDeployments({ limit: 5, target, timeoutMs: GITHUB_LOOKUP_TIMEOUT_MS });
+      return `[Vercel${target ? ` · ${target}` : ""}]\n${body}`;
     },
   },
   {
