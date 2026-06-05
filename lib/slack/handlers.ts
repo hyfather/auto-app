@@ -1,49 +1,128 @@
 import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { getActiveTasks } from "@/lib/autoapp/task";
-import { completeTask, requestAutonomousMergeIfReady } from "@/lib/autoapp/execute";
-import { runAutoappAgent } from "@/lib/agent/runAgent";
+import { cancelTask, completeTask, requestAutonomousMergeIfReady } from "@/lib/autoapp/execute";
+import { ACTIVE_TASK_STATUSES, formatTaskCode } from "@/lib/autoapp/policies";
+import { runAutoappAgent, type AgentSource } from "@/lib/agent/runAgent";
 import { HELP_TEXT } from "@/lib/agent/help";
 import { classifySlackMessage, type ClassificationOutput } from "./classifySlackMessage";
 import { parseToolUpdate } from "./parseToolUpdate";
 import { postToGeneral } from "./postMessage";
 import { syncTaskReaction } from "./reactions";
+import { getThreadHistory } from "./threadHistory";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
-type HandlerOptions = { threadTs?: string; sourceTs?: string };
+type HandlerOptions = { threadTs?: string; sourceTs?: string; channelId?: string; botUserId?: string | null };
 
 const SLASH_COMMAND_ACTOR = "slack-user";
+
+/**
+ * Run the tool-calling agent for one inbound message, loading the thread's
+ * conversation history first so multi-turn dialogue (clarify → answer → act)
+ * stays continuous. Database-schema errors are surfaced as a friendly setup
+ * hint instead of throwing.
+ */
+async function respond(text: string, userId: string, source: AgentSource, options: HandlerOptions): Promise<string> {
+  try {
+    const history = await getThreadHistory(options.channelId, options.threadTs, options.botUserId, options.sourceTs);
+    return await runAutoappAgent(text, {
+      userId,
+      source,
+      history,
+      threadTs: options.threadTs,
+      sourceTs: options.sourceTs,
+      channelId: options.channelId,
+    });
+  } catch (error) {
+    if (isMissingDatabaseSchemaError(error)) return `[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`;
+    throw error;
+  }
+}
 
 /**
  * Entry point for the `/autoapp` slash command. Everything except `help` is
  * handed to the tool-calling agent, which decides which task/status tool to run.
  */
 export async function handleAutoappCommand(text: string, userId: string = SLASH_COMMAND_ACTOR, options: HandlerOptions = {}): Promise<string> {
-  try {
-    const trimmed = text.trim();
-    const command = (trimmed.split(/\s+/)[0] || "help").toLowerCase();
-    if (!trimmed || command === "help" || command === "controls") return HELP_TEXT;
-    return await runAutoappAgent(trimmed, { userId, threadTs: options.threadTs, sourceTs: options.sourceTs });
-  } catch (error) {
-    if (isMissingDatabaseSchemaError(error)) return `[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`;
-    throw error;
-  }
+  const trimmed = text.trim();
+  const command = (trimmed.split(/\s+/)[0] || "help").toLowerCase();
+  if (!trimmed || command === "help" || command === "controls") return HELP_TEXT;
+  return respond(trimmed, userId, "command", options);
 }
 
-/** Entry point for `@autoapp` mentions and conversational thread replies. */
+/** Entry point for `@autoapp` mentions. */
 export async function handleMention(text: string, userId: string, options: HandlerOptions = {}): Promise<string> {
-  try {
-    const cleaned = stripAutoappMention(text);
-    if (!cleaned) return HELP_TEXT;
-    return await runAutoappAgent(cleaned, { userId, threadTs: options.threadTs, sourceTs: options.sourceTs });
-  } catch (error) {
-    if (isMissingDatabaseSchemaError(error)) return `[Database setup required]\n${DATABASE_SCHEMA_SETUP_MESSAGE}`;
-    throw error;
-  }
+  const cleaned = stripAutoappMention(text);
+  if (!cleaned) return HELP_TEXT;
+  return respond(cleaned, userId, "mention", options);
+}
+
+/**
+ * Entry point for a plain human message in #general (top-level or a reply inside
+ * a thread AutoApp is part of) that does not @mention AutoApp. AutoApp answers
+ * every such message conversationally, just like Cursor's Slack integration.
+ */
+export async function handleChannelMessage(text: string, userId: string, options: HandlerOptions = {}): Promise<string> {
+  const cleaned = stripAutoappMention(text);
+  if (!cleaned) return HELP_TEXT;
+  return respond(cleaned, userId, "channel", options);
 }
 
 function stripAutoappMention(text: string) {
   return text.replace(/<@[^>]+>/g, "").replace(/@autoapp/gi, "").trim();
+}
+
+/**
+ * Emoji (reacji) that mean "cancel/stop this" when a user reacts to one of
+ * AutoApp's task messages. Reacting with any of these on a message tied to an
+ * active task cancels that task and stops its Cursor cloud agent.
+ */
+const CANCEL_REACTIONS = new Set([
+  "x",
+  "no_entry",
+  "no_entry_sign",
+  "octagonal_sign",
+  "stop_sign",
+  "no_good",
+  "negative_squared_cross_mark",
+  "wastebasket",
+  "no_pedestrians",
+]);
+
+/**
+ * Find the active task a reacted-to message belongs to. A reaction can land on
+ * the originating request (the task's `slackRootTs`) or on any AutoApp log
+ * posted inside that task's thread, so we map the message to its thread root
+ * via `SlackMemory` and then look the task up by `slackRootTs`.
+ */
+async function findActiveTaskForMessage(messageTs: string) {
+  const direct = await prisma.task.findFirst({ where: { slackRootTs: messageTs, status: { in: [...ACTIVE_TASK_STATUSES] } } });
+  if (direct) return direct;
+  const memory = await prisma.slackMemory.findFirst({ where: { messageTs }, select: { threadTs: true } });
+  const root = memory?.threadTs;
+  if (!root) return null;
+  return prisma.task.findFirst({ where: { slackRootTs: root, status: { in: [...ACTIVE_TASK_STATUSES] } } });
+}
+
+/**
+ * Interpret a reaction added to a message in #general as a control signal. A
+ * cancel-style reacji on a message tied to an active task cancels that task.
+ * Returns true when the reaction was consumed as a command (so the caller can
+ * skip the generic "wake up" nudge for it). Never throws.
+ */
+export async function handleReactionCommand(reaction: string, messageTs: string | undefined, userId: string): Promise<boolean> {
+  try {
+    if (!messageTs || !CANCEL_REACTIONS.has(reaction)) return false;
+    const task = await findActiveTaskForMessage(messageTs);
+    if (!task) return false;
+    await cancelTask(task.id, userId, messageTs);
+    await postToGeneral(`Cancelled ${formatTaskCode(task.id)} because of your :${reaction}: reaction.`, task.slackRootTs || undefined);
+    return true;
+  } catch (error) {
+    if (isMissingDatabaseSchemaError(error)) return false;
+    console.error("[Slack reactions] Failed to handle reaction command:", error instanceof Error ? error.message : error);
+    return false;
+  }
 }
 
 export type RecordedSlackMessage = ClassificationOutput & { isDuplicate: boolean };

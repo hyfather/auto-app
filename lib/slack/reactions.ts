@@ -76,6 +76,34 @@ export async function markMessageWorking(messageTs: string | null | undefined): 
   await syncTaskReaction(messageTs, "queued");
 }
 
+/** Slack-safe reaction name: lowercase, alphanumeric/underscore/plus/minus, no colons. */
+function normalizeEmojiName(emoji: string): string {
+  return emoji.trim().replace(/^:|:$/g, "").replace(/[^a-z0-9_+-]/gi, "").toLowerCase();
+}
+
+/**
+ * Add an arbitrary emoji reaction to a message so AutoApp can "emote" — e.g.
+ * 🎉 when a change ships, 🤔 while it thinks, 🙏 to acknowledge. Best-effort and
+ * never throws: a missing token/scope or an unknown emoji is logged and
+ * swallowed so it can't break a control-plane handler. Returns true when the
+ * reaction was added (or already present), false otherwise.
+ */
+export async function addReaction(messageTs: string | null | undefined, emoji: string): Promise<boolean> {
+  const channel = process.env.SLACK_GENERAL_CHANNEL_ID;
+  const client = getSlackClient();
+  const name = normalizeEmojiName(emoji || "");
+  if (!channel || !client || !messageTs || !name) return false;
+  try {
+    await client.reactions.add({ channel, timestamp: messageTs, name });
+    return true;
+  } catch (error) {
+    const code = (error as { data?: { error?: string } } | undefined)?.data?.error;
+    if (code && BENIGN_REACTION_ERRORS.has(code)) return true;
+    logReactionError("add custom", error);
+    return false;
+  }
+}
+
 /**
  * Close out a mention that did not hand off to a task lifecycle: swap :eyes: for
  * :white_check_mark: when AutoApp answered successfully, or :warning: when it

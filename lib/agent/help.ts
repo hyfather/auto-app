@@ -3,7 +3,9 @@ import { MAX_ACTIVE_TASKS } from "@/lib/autoapp/task";
 export const HELP_TEXT = [
   "*AutoApp controls*",
   `AutoApp turns your requests into code changes implemented by Cursor cloud agents that open and auto-merge PRs. It runs up to ${MAX_ACTIVE_TASKS} tasks in parallel; extra requests are turned away until a slot frees up.`,
-  "Just describe what you want, e.g. `@autoapp make the landing page default to light mode`, and AutoApp queues a task and launches a Cursor cloud agent.",
+  "Just talk to me in this channel — no slash command or @mention needed. I reply in a thread under your message, ask a clarifying question when something's ambiguous, and stream progress there. e.g. `make the landing page default to light mode` and I'll queue a task and launch a Cursor cloud agent.",
+  "",
+  "*Reactions (reacji):* I react with :eyes: while I'm on it and emote (e.g. :rocket: / :tada:) as work progresses. React with :x:/:no_entry:/:wastebasket: on a task's message to cancel it; any reaction also nudges in-flight tasks forward.",
   "",
   "*Manage tasks (`/autoapp` slash command or `@autoapp` mention):*",
   "• `/autoapp queue` — list every queued/in-flight task with its `AUTO-XXXXXX` code, status, and PR link.",

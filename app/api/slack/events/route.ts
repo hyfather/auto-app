@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { after } from "next/server";
-import { handleMention, recordSlackMessage } from "@/lib/slack/handlers";
+import { handleChannelMessage, handleMention, handleReactionCommand, recordSlackMessage } from "@/lib/slack/handlers";
 import { nudgeActiveTasks } from "@/lib/autoapp/execute";
 import { isMessageTrackedByTask } from "@/lib/autoapp/task";
 import { getBotUserId } from "@/lib/slack/client";
 import { postToGeneral } from "@/lib/slack/postMessage";
 import { markMessageDone, markMessageWorking } from "@/lib/slack/reactions";
+import { hasAutoappRepliedInThread } from "@/lib/slack/threadHistory";
 import { verifySlackRequest } from "@/lib/slack/verify";
 import { DATABASE_SCHEMA_SETUP_MESSAGE, isMissingDatabaseSchemaError } from "@/lib/prisma-errors";
 
@@ -44,10 +45,30 @@ function mentionsAutoapp(event: SlackEvent, botUserId?: string | null) {
   return Boolean((botUserId && text.includes(botUserId)) || /@autoapp/i.test(text));
 }
 
-function shouldHandleConversationalReply(event: SlackEvent) {
-  if (!event.thread_ts || event.bot_id || !event.user) return false;
-  const text = event.text || "";
-  return /\?|task|start|begin|kick off|launch|run|improve|make|change|remember|also|actually|instead|status/i.test(text);
+/**
+ * Slack `message` subtypes we treat as real human messages worth answering.
+ * Most subtypes (joins, edits, deletions, bot messages, …) are housekeeping we
+ * skip. A plain message has no subtype; file shares and thread broadcasts carry
+ * human text we still want to handle.
+ */
+const ANSWERABLE_SUBTYPES = new Set([undefined, "", "file_share", "thread_broadcast"]);
+
+/**
+ * A genuine human message from someone other than AutoApp itself. We never
+ * respond to integration bots (Cursor/GitHub/Vercel posts carry `bot_id`) or to
+ * our own messages, which prevents response loops now that AutoApp answers
+ * every human message in the channel.
+ */
+function isHumanMessage(event: SlackEvent, botUserId?: string | null): boolean {
+  if (event.type === "app_mention") return Boolean(event.user) && event.user !== botUserId;
+  if (event.type && event.type !== "message") return false;
+  if (event.bot_id || !event.user) return false;
+  if (botUserId && event.user === botUserId) return false;
+  return ANSWERABLE_SUBTYPES.has(event.subtype);
+}
+
+function isThreadReply(event: SlackEvent): boolean {
+  return Boolean(event.thread_ts && event.thread_ts !== event.ts);
 }
 
 /**
@@ -85,29 +106,47 @@ async function processEvent(event: SlackEvent) {
   // bails so the user gets exactly one reply.
   if (classified.isDuplicate) return;
 
-  const shouldRespond = mentions ? classified.authorType !== "autoapp" : shouldHandleConversationalReply(event) && classified.authorType === "human";
+  if (!isHumanMessage(event, botUserId)) return;
+
+  // AutoApp answers every human message in its channel, just like Cursor's
+  // Slack integration: top-level messages and explicit @mentions always get a
+  // reply, and a thread reply continues the conversation when AutoApp is
+  // already part of that thread (or the reply reads conversational).
+  const channelId = event.channel;
+  const threadRoot = replyThreadTs(event);
+  let shouldRespond = true;
+  if (!mentions && isThreadReply(event)) {
+    shouldRespond = (await hasAutoappRepliedInThread(channelId, event.thread_ts, botUserId)) || looksConversational(event);
+  }
   if (!shouldRespond) return;
 
-  const threadTs = replyThreadTs(event);
-  // For an @mention, react to the user's message (the thread root) with :eyes:
-  // so they can immediately see AutoApp picked the request up. The reaction
-  // target matches the task's slackRootTs, so a task launched from this mention
-  // can later swap :eyes: for :white_check_mark:/:warning: on the same message.
-  const reactionTs = mentions ? threadTs : undefined;
+  const threadTs = threadRoot;
+  // React to the user's own message with :eyes: so they get instant feedback
+  // that AutoApp picked it up. A task launched from a top-level message owns the
+  // same message (slackRootTs === event.ts) and will swap :eyes: for
+  // :white_check_mark:/:warning:; anything else is finalized here.
+  const reactionTs = event.ts;
   if (reactionTs) await markMessageWorking(reactionTs);
 
+  const options = { threadTs, sourceTs: event.ts, channelId, botUserId };
   try {
-    const response = await handleMention(event.text || "", event.user || "unknown", { threadTs, sourceTs: event.ts });
+    const response = mentions
+      ? await handleMention(event.text || "", event.user || "unknown", options)
+      : await handleChannelMessage(event.text || "", event.user || "unknown", options);
     await postToGeneral(response, threadTs);
-    // A mention that launched a task hands its reaction off to the task
-    // lifecycle (it owns the same message via slackRootTs). A read-only request
-    // like status has no backing task, so finalize the :eyes: here.
     if (reactionTs && !(await isMessageTrackedByTask(reactionTs))) await markMessageDone(reactionTs, true);
   } catch (error) {
-    console.error("[Slack events] Failed to handle mention:", error instanceof Error ? error.message : error);
+    console.error("[Slack events] Failed to handle message:", error instanceof Error ? error.message : error);
     await postToGeneral("I hit an unexpected error handling that. The team can check the logs; try `@autoapp status` or rephrase your request.", threadTs);
     if (reactionTs) await markMessageDone(reactionTs, false);
   }
+}
+
+/** A thread reply that reads like it's meant for AutoApp (a question or ask). */
+function looksConversational(event: SlackEvent): boolean {
+  return /\?|task|start|begin|kick off|launch|run|improve|make|change|remember|also|actually|instead|status|yes|no|sure|go ahead|sounds good/i.test(
+    event.text || "",
+  );
 }
 
 /**
@@ -121,6 +160,13 @@ async function processEvent(event: SlackEvent) {
 async function processReactionEvent(event: SlackEvent): Promise<void> {
   const botUserId = await getBotUserId();
   if (botUserId && event.user === botUserId) return;
+  // A cancel-style reacji (❌/🛑/🗑️ …) on a message tied to an active task
+  // cancels it. Every reaction still nudges in-flight work forward.
+  try {
+    await handleReactionCommand(event.reaction || "", event.item?.ts, event.user || "unknown");
+  } catch (error) {
+    console.error("[Slack events] Failed to handle reaction command:", error instanceof Error ? error.message : error);
+  }
   await nudgeActiveTasks();
 }
 
