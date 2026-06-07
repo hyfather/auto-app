@@ -26,19 +26,32 @@ When `OPENAI_API_KEY` is set, the agent runs an OpenAI function-calling loop (`O
 
 AutoApp runs up to **5 tasks in parallel**. When 5 tasks are already in flight, a new request is **turned away** (not queued) until a slot frees up — cancel one with `/autoapp cancel <task>` to make room.
 
-Each task:
+Each task progresses through a state machine with an audit trail:
 
-1. Is created from your Slack request and immediately dispatched to a Cursor cloud agent with `autoCreatePR` enabled.
-2. Gets a focused prompt: the task request plus do/don't guardrails and acceptance criteria, prefixed with the overarching mission when one is set.
-3. Opens a pull request, which AutoApp watches through the GitHub REST API and merges once it is mergeable and checks are green.
+```
+queued → waiting_for_agent → pr_opened → waiting_for_checks →
+waiting_for_preview_deploy → preview_deployed → waiting_for_merge →
+waiting_for_production_deploy → production_deployed → completed
+                                                         → failed
+                                                         → cancelled
+```
 
-A merged PR on `main` is AutoApp's success condition: once the change lands on the default branch the task is marked successful and the loop closes — whether AutoApp merged it through the API or GitHub native auto-merge did. AutoApp does **not** block waiting for a Vercel production-deploy signal.
+Key behaviors per state:
+
+1. **queued** — created from your Slack request; dispatched to a Cursor cloud agent with `autoCreatePR` enabled.
+2. **waiting_for_agent** — Cursor cloud agent is implementing the change.
+3. **pr_opened** — a PR has been created; AutoApp begins watching it.
+4. **waiting_for_checks** — GitHub checks must pass. AutoApp maps check outcomes: failure → task failed, pending → wait, success → proceed. Merge conflicts are detected here and the task waits until resolved.
+5. **waiting_for_merge** — checks are green and the PR is mergeable; AutoApp merges through the GitHub REST API (or GitHub native auto-merge does).
+6. **completed** — the change landed on `main`. This is the success condition.
+
+A merged PR on `main` is AutoApp's success condition: once the change lands on the default branch the task is marked successful and the loop closes — whether AutoApp merged it through the API or GitHub native auto-merge did. AutoApp does **not** block waiting for a Vercel production-deploy signal, but a post-merge sweep recovers tasks stuck in waiting states.
 
 ## Integration model
 
-- **Cursor Cloud Agents are the implementation worker.** AutoApp launches a [Cursor cloud agent](https://cursor.com/docs/cloud-agent/api/endpoints) through the Cursor API (`POST https://api.cursor.com/v1/agents`). The launch prompt also asks the agent to enable GitHub native auto-merge (`gh pr merge --auto`) so GitHub merges the PR once all required checks pass (configurable via `GITHUB_PR_AUTO_MERGE`).
-- **GitHub is the code/change-management facet.** AutoApp polls the GitHub REST API for the PR link, state, checks, and mergeability, and merges directly through the API when ready.
-- **Vercel is the deployment/runtime facet.** Deployment status is read from Vercel Slack notifications in `#general`; AutoApp does not call the Vercel API.
+- **Cursor Cloud Agents are the implementation worker.** AutoApp launches a [Cursor cloud agent](https://cursor.com/docs/cloud-agent/api/endpoints) through the Cursor API (`POST https://api.cursor.com/v1/agents`). The launch prompt also asks the agent to enable GitHub native auto-merge (`gh pr merge --auto`) so GitHub merges the PR once all required checks pass (configurable via `GITHUB_PR_AUTO_MERGE`). When auto-merge cannot be enabled, AutoApp still watches checks and merges through the GitHub API as a fallback.
+- **GitHub is the code/change-management facet.** AutoApp polls the GitHub REST API for the PR link, state, checks, and mergeability, and merges directly through the API when ready. Before merging, it records a `merge_recommended` decision in the database as an audit trail.
+- **Vercel is the deployment/runtime facet.** AutoApp calls the Vercel REST API (`GET /v6/deployments`) to read live deployment state for status summaries.
 - **Slack is the control plane.** All activity flows through `SLACK_GENERAL_CHANNEL_ID`.
 
 ## Working log labels
@@ -51,6 +64,8 @@ AutoApp is conversational, like Cursor's own Slack integration: **add the bot to
 
 - **Every top-level message gets an immediate, friendly reply in a thread.** AutoApp reacts with :eyes: the moment it picks your message up, then answers in a thread hanging off your message and streams any task progress there.
 - **It asks clarifying questions.** When a change request is ambiguous, risky, or could be built several ways, AutoApp asks one tight round of questions first. Answer in the thread and it continues — the whole thread is fed back to the agent so follow-ups read naturally (this multi-turn intelligence requires `OPENAI_API_KEY`; without it AutoApp uses a deterministic keyword router that still routes commands and starts tasks).
+- **Thread participation.** If AutoApp has already replied in a thread, it continues responding to follow-ups in that thread. If it hasn't, it only responds if the reply reads like a continuation (e.g., contains a question or task-related keywords). This prevents noise from unrelated thread conversations.
+- **Channel vs command behavior.** When addressed directly (via `/autoapp` or `@autoapp`), unmatched requests default to creating a task. When reading a plain channel message, the agent first checks whether it sounds like a code change request; messages that don't look like change requests get a conversational response instead of launching a Cursor agent.
 - **It focuses on upkeep of the Vercel-hosted frontend.** Describe a change and AutoApp launches a Cursor cloud agent to implement it, opens a PR, watches checks, and merges — which auto-deploys to Vercel.
 
 Examples (just type these in `#general`):
@@ -138,14 +153,14 @@ See `.env.example` for required and optional variables:
 
 - `DATABASE_URL`
 - `OPENAI_API_KEY` (optional): powers the Slack tool-calling agent; without it AutoApp uses the deterministic keyword router.
-- `OPENAI_API_BASE_URL` (optional): override OpenAI-compatible API base URL.
+- `OPENAI_API_BASE_URL` (optional): override to use any OpenAI-compatible provider (e.g., local Ollama, Azure OpenAI).
 - `OPENAI_AGENT_MODEL` (optional): OpenAI model used by the agent; defaults to `gpt-4o-mini`.
 - `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, `SLACK_APP_TOKEN`, `SLACK_GENERAL_CHANNEL_ID`
 - `NEXT_PUBLIC_APP_URL`: the public app URL the `evaluate_app` tool reviews.
 - `CURSOR_API_KEY`, `CURSOR_AGENT_REPO_URL`, `CURSOR_AGENT_STARTING_REF` (optional), `CURSOR_AGENT_MODEL` (optional), `CURSOR_API_BASE_URL` (optional)
 - `GITHUB_TOKEN`, `GITHUB_REPOSITORY`, `GITHUB_MERGE_METHOD` (optional), `GITHUB_MERGE_REQUIRE_CHECKS` (optional), `GITHUB_PR_AUTO_MERGE` (optional), `GITHUB_CURSOR_AUTHOR_LOGIN` (optional), `GITHUB_API_BASE_URL` (optional)
+- `VERCEL_TOKEN` (optional): used by the live Vercel API client to read deployment state; also set `VERCEL_PROJECT_ID` and `VERCEL_TEAM_ID` (optional).
 - Optional bot IDs: `AUTOAPP_BOT_USER_ID`, `CURSOR_BOT_USER_ID`, `VERCEL_BOT_USER_ID`, `GITHUB_BOT_USER_ID`
-- Future-only: `VERCEL_TOKEN`
 
 ## Public app
 
@@ -160,4 +175,8 @@ The `/` route renders a static landing page describing AutoApp as a Slack-contro
 - Cursor Cloud Agents API as the implementation worker
 - GitHub REST polling and direct PR merge
 - A scheduled sweep (`/api/cron/poll`) that advances in-flight tasks; Slack messages, mentions, slash commands, and reactions also nudge the same sweep on demand (important on Vercel's free plan, where the cron only runs daily)
-- Vercel deployment through the connected GitHub repository
+- `GET /api/health` — returns JSON with DB connectivity, integration config status, and task queue capacity; returns 503 if the database is unreachable.
+- `POST /api/notify` — landing-page email subscription endpoint; upserts into a `launchSubscriber` table.
+- `GET /api/slack/interactive` — placeholder stub for future interactive Slack components.
+- Vercel REST API client (`lib/vercel/client.ts`) — reads live deployment state via `GET /v6/deployments`.
+- Decision audit trail — before merging or cancelling a task, AutoApp records a `Decision` row in the database for traceability.
