@@ -14,7 +14,7 @@ There is no automatic web-app scoring. AutoApp only acts on **tasks** a human re
 The Slack backend is a tool-calling agent (`lib/agent`). When you message AutoApp, the agent decides which tool to call:
 
 - `create_task` — launch a Cursor cloud agent to implement a focused change (this is how "invoking the Cursor agent" happens).
-- `list_tasks`, `cancel_task`, `update_task`, `set_mission`, `get_mission` — manage the task queue and mission.
+- `list_tasks`, `cancel_task`, `update_task`, `set_mission`, `get_mission`, `summarize_task` — manage the task queue and mission.
 - `get_status`, `list_pull_requests`, `get_deployments`, `get_vercel_info` — read live state from GitHub and Vercel.
 - `evaluate_app` — review the current state of the live app (fetches the homepage and returns status/title/text).
 - `react_to_message` — add an emoji reaction to the user's message to emote (e.g. :rocket:, :tada:, :thinking_face:).
@@ -77,14 +77,16 @@ AutoApp uses emoji reactions as a two-way signal:
 Configure one `/autoapp` slash command pointed at `/api/slack/commands`. Everything except `help` is routed through the same tool-calling agent.
 
 - `/autoapp new <request>` (or just the request) — queue a task and launch a Cursor cloud agent.
-- `/autoapp queue` (aliases `tasks`, `list`) — list every queued/in-flight task with its `AUTO-XXXXXX` code, status, and PR link.
+- `/autoapp queue` — list every queued/in-flight task with its `AUTO-XXXXXX` code, status, and PR link.
 - `/autoapp update <task> <new instructions>` — revise a task. `<task>` is its `AUTO-XXXXXX` code or queue slot like `#2`. Before launch it rewrites the request; after launch it sends a follow-up to the running Cursor cloud agent.
 - `/autoapp cancel <task>` — cancel one task and stop its Cursor cloud agent. `/autoapp cancel all` cancels every active task.
 - `/autoapp mission <text>` — set or update AutoApp's overarching, durable mission, folded into every new task prompt. `/autoapp mission` shows it; `/autoapp mission clear` removes it.
 - `/autoapp status` — task queue (N/5) plus open PRs with their checks and the last deployment.
 - `/autoapp prs [open|closed|all]` — list pull requests with their state and CI checks.
 - `/autoapp deployments` — show the last deployment and its state.
+- `/autoapp vercel` — latest Vercel deployments and their state.
 - `/autoapp evaluate` — review the current state of the live app.
+- `/autoapp tools` — list the tools (capabilities) AutoApp can use.
 - `/autoapp help`
 
 Mentions such as `@autoapp status`, `@autoapp cancel AUTO-AB12CD`, and `@autoapp add a pricing FAQ` behave exactly like the same plain channel message — AutoApp replies in a thread under your message and streams progress there.
