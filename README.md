@@ -132,6 +132,27 @@ The events and slash-command endpoints acknowledge Slack within its timeout wind
 9. Connect the GitHub repository to Vercel so merges to `main` deploy automatically.
 10. Set environment variables from `.env.example`, run locally with `npm run dev`, and deploy to Vercel.
 
+## Slack app configuration
+
+`/autoapp` (slash command) and `@autoapp` (mention) are powered by two **separate** Slack subsystems with separate configuration. If the slash command works but mentions do nothing, the slash command is configured correctly and the **Event Subscriptions** config is the missing piece — no code change can fix that, because Slack never delivers the event to the app.
+
+Configure both in your Slack app (https://api.slack.com/apps):
+
+1. **Slash Commands** → create `/autoapp` with the Request URL `https://<your-deployment>/api/slack/commands`.
+2. **Event Subscriptions** → turn it **On** and set the Request URL to `https://<your-deployment>/api/slack/events`. It must show **Verified** (the endpoint answers Slack's `url_verification` challenge).
+3. Under **Subscribe to bot events**, add:
+   - `app_mention` — delivers `@autoapp …` mentions. **Required for mentions to work at all.**
+   - `message.channels` — lets AutoApp also see plain channel messages, so it catches a mention that arrives only as a `message` event and supports conversational thread replies.
+4. **OAuth & Permissions → Bot Token Scopes**, add:
+   - `app_mentions:read` (for `app_mention`)
+   - `channels:history` (for `message.channels`)
+   - `chat:write` (to post replies)
+5. **Reinstall the app to your workspace** after changing scopes or events (Slack will not deliver new event types until you reinstall).
+6. **Invite the bot to `#general`** (`/invite @autoapp`) — `app_mention`/`message.channels` events are only delivered for channels the bot is a member of.
+7. Set `SLACK_GENERAL_CHANNEL_ID` to that channel's ID. The events endpoint ignores any event whose channel id does not match this value, so a missing/wrong id silently drops every mention.
+
+**Quick diagnosis:** send `@autoapp status`, then check your deployment logs. If you see no `[Slack events]` activity at all, Slack isn't delivering the event → fix the Event Subscriptions / scopes / channel membership above. If you see the event arrive but get no reply, it's an app-side issue (e.g. `SLACK_GENERAL_CHANNEL_ID` mismatch) rather than Slack config.
+
 ## Environment variables
 
 See `.env.example` for required and optional variables:
